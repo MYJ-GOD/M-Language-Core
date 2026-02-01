@@ -106,7 +106,8 @@ uint32_t m_vm_encode_zigzag(int32_t n) {
 } while(0)
 
 #define CHECK_PC(vm, addr) do { \
-    if ((addr) < 0 || (addr) >= (vm)->code_len) { SET_FAULT((vm), M_FAULT_PC_OOB); return; } \
+    int _addr = (int)(addr); \
+    if (_addr < 0 || _addr >= (vm)->code_len) { SET_FAULT((vm), M_FAULT_PC_OOB); return; } \
 } while(0)
 
 #define TOP(vm) ((vm)->stack[(vm)->sp])
@@ -158,7 +159,9 @@ static bool to_bool(M_Value v) {
 static void h_dup(M_VM* v) {
     NEED(v, 1);
     SPACE(v, 1);
-    PUSH(v, TOP(v));
+    /* Use memcpy to ensure correct struct copy */
+    memcpy(&v->stack[v->sp + 1], &v->stack[v->sp], sizeof(M_Value));
+    v->sp++;
 }
 
 static void h_drp(M_VM* v) {
@@ -269,6 +272,15 @@ static void h_div(M_VM* v) {
     PUSH(v, make_int(a / b));
 }
 
+static void h_mod(M_VM* v) {
+    /* Modulo: a,b -> a%b (C semantics: sign matches a) */
+    NEED(v, 2);
+    int32_t b = to_int(POP(v));
+    if (b == 0) { SET_FAULT(v, M_FAULT_MOD_BY_ZERO); return; }
+    int32_t a = to_int(POP(v));
+    PUSH(v, make_int(a % b));
+}
+
 static void h_and(M_VM* v) {
     NEED(v, 2);
     int32_t b = to_int(POP(v));
@@ -355,35 +367,131 @@ static void h_eq(M_VM* v) {
 static void h_len(M_VM* v) {
     NEED(v, 1);
     M_Value arr = POP(v);
-    if (arr.type == M_TYPE_ARRAY) {
-        PUSH(v, make_int(arr.u.arr.len));
+    if (arr.type == M_TYPE_ARRAY && arr.u.array_ptr != NULL) {
+        /* Push length using memcpy */
+        M_Value len_val;
+        len_val.type = M_TYPE_INT;
+        len_val.u.i = arr.u.array_ptr->len;
+        v->sp++;
+        memcpy(&v->stack[v->sp], &len_val, sizeof(M_Value));
     } else {
-        PUSH(v, make_int(0));
+        SET_FAULT(v, M_FAULT_TYPE_MISMATCH);
     }
+}
+
+static void h_newarr(M_VM* v) {
+    /* NEWARR: <size> -> <array_ref> */
+    NEED(v, 1);
+    int32_t size = to_int(POP(v));
+    if (size < 0) { SET_FAULT(v, M_FAULT_BAD_ARG); return; }
+    if (size > 1000000) { SET_FAULT(v, M_FAULT_BAD_ARG); return; }  /* Sanity limit */
+
+    /* Allocate array header + data */
+    size_t header_size = sizeof(M_Array);
+    size_t data_size = (size_t)size * sizeof(M_Value);
+    M_Array* arr = (M_Array*)malloc(header_size + data_size);
+
+    if (!arr) { SET_FAULT(v, M_FAULT_OOM); return; }
+
+    arr->len = size;
+    arr->cap = size;
+    for (int32_t i = 0; i < size; i++) {
+        arr->data[i].type = M_TYPE_INT;
+        arr->data[i].u.i = 0;
+    }
+
+    /* Track allocation */
+    AllocNode* node = (AllocNode*)malloc(sizeof(AllocNode));
+    if (!node) {
+        free(arr);
+        SET_FAULT(v, M_FAULT_OOM);
+        return;
+    }
+    node->ptr = arr;
+    node->next = v->alloc_head;
+    v->alloc_head = node;
+
+    /* Push array reference using memcpy */
+    M_Value arr_val;
+    arr_val.type = M_TYPE_ARRAY;
+    arr_val.u.array_ptr = arr;
+    v->sp++;
+    memcpy(&v->stack[v->sp], &arr_val, sizeof(M_Value));
+}
+
+static void h_idx(M_VM* v) {
+    /* IDX: <array_ref>,<index> -> <element> */
+    NEED(v, 2);
+    int32_t idx = to_int(POP(v));
+    M_Value arr = POP(v);
+
+    if (arr.type != M_TYPE_ARRAY || arr.u.array_ptr == NULL) {
+        SET_FAULT(v, M_FAULT_TYPE_MISMATCH);
+        return;
+    }
+    if (idx < 0 || idx >= arr.u.array_ptr->len) {
+        SET_FAULT(v, M_FAULT_INDEX_OOB);
+        return;
+    }
+
+    PUSH(v, arr.u.array_ptr->data[idx]);
+}
+
+static void h_sto(M_VM* v) {
+    /* STO: <array_ref>,<index>,<value> -> <array_ref> */
+    NEED(v, 3);
+    M_Value val = POP(v);
+    int32_t idx = to_int(POP(v));
+    M_Value arr = POP(v);
+
+    if (arr.type != M_TYPE_ARRAY || arr.u.array_ptr == NULL) {
+        SET_FAULT(v, M_FAULT_TYPE_MISMATCH);
+        return;
+    }
+    if (idx < 0 || idx >= arr.u.array_ptr->len) {
+        SET_FAULT(v, M_FAULT_INDEX_OOB);
+        return;
+    }
+
+    arr.u.array_ptr->data[idx] = val;
+    /* Use memcpy to ensure correct struct copy */
+    v->sp++;
+    memcpy(&v->stack[v->sp], &arr, sizeof(M_Value));
 }
 
 static void h_get(M_VM* v) {
     NEED(v, 2);
     int32_t idx = to_int(POP(v));
     M_Value arr = POP(v);
-    if (arr.type == M_TYPE_ARRAY && idx >= 0 && idx < arr.u.arr.len) {
-        PUSH(v, make_int(arr.u.arr.data[idx]));
-    } else {
-        SET_FAULT(v, M_FAULT_INDEX_OOB);
+
+    if (arr.type != M_TYPE_ARRAY || arr.u.array_ptr == NULL) {
+        SET_FAULT(v, M_FAULT_TYPE_MISMATCH);
+        return;
     }
+    if (idx < 0 || idx >= arr.u.array_ptr->len) {
+        SET_FAULT(v, M_FAULT_INDEX_OOB);
+        return;
+    }
+    PUSH(v, arr.u.array_ptr->data[idx]);
 }
 
 static void h_put(M_VM* v) {
     NEED(v, 3);
-    int32_t val = to_int(POP(v));
+    M_Value val = POP(v);
     int32_t idx = to_int(POP(v));
     M_Value arr = POP(v);
-    if (arr.type == M_TYPE_ARRAY && idx >= 0 && idx < arr.u.arr.len) {
-        arr.u.arr.data[idx] = val;
-        PUSH(v, arr);
-    } else {
-        SET_FAULT(v, M_FAULT_INDEX_OOB);
+
+    if (arr.type != M_TYPE_ARRAY || arr.u.array_ptr == NULL) {
+        SET_FAULT(v, M_FAULT_TYPE_MISMATCH);
+        return;
     }
+    if (idx < 0 || idx >= arr.u.array_ptr->len) {
+        SET_FAULT(v, M_FAULT_INDEX_OOB);
+        return;
+    }
+
+    arr.u.array_ptr->data[idx] = val;
+    PUSH(v, arr);
 }
 
 /* --- Control Flow --- */
@@ -638,43 +746,49 @@ static void h_ph(M_VM* v) {
  * ============================================= */
 
 static const uint32_t GAS_COST[256] = {
-    [M_LIT]   = 2,
-    [M_V]     = 2,
-    [M_LET]   = 2,
-    [M_SET]   = 3,
-    [M_ADD]   = 1,
-    [M_SUB]   = 1,
-    [M_MUL]   = 3,
-    [M_DIV]   = 5,
-    [M_AND]   = 1,
-    [M_OR]    = 1,
-    [M_XOR]   = 1,
-    [M_SHL]   = 1,
-    [M_SHR]   = 1,
-    [M_LT]    = 1,
-    [M_GT]    = 1,
-    [M_LE]    = 1,
-    [M_GE]    = 1,
-    [M_EQ]    = 1,
-    [M_DUP]   = 1,
-    [M_DRP]   = 1,
-    [M_SWP]   = 1,
-    [M_ROT]   = 1,
-    [M_LEN]   = 2,
-    [M_GET]   = 2,
-    [M_PUT]   = 3,
-    [M_B]     = 0,
-    [M_E]     = 0,
-    [M_IF]    = 1,
-    [M_RT]    = 2,
-    [M_CL]    = 5,
-    [M_HALT]  = 0,
-    [M_GTWAY] = 1,
-    [M_WAIT]  = 1,
-    [M_IOW]   = 5,
-    [M_IOR]   = 3,
-    [M_TRACE] = 1,
-    [M_PH]    = 0
+    [M_LIT]    = 2,
+    [M_V]      = 2,
+    [M_LET]    = 2,
+    [M_SET]    = 3,
+    [M_ADD]    = 1,
+    [M_SUB]    = 1,
+    [M_MUL]    = 3,
+    [M_DIV]    = 5,
+    [M_MOD]    = 5,
+    [M_AND]    = 1,
+    [M_OR]     = 1,
+    [M_XOR]    = 1,
+    [M_SHL]    = 1,
+    [M_SHR]    = 1,
+    [M_LT]     = 1,
+    [M_GT]     = 1,
+    [M_LE]     = 1,
+    [M_GE]     = 1,
+    [M_EQ]     = 1,
+    [M_DUP]    = 1,
+    [M_DRP]    = 1,
+    [M_ROT]    = 1,
+    [M_GET]    = 2,
+    [M_PUT]    = 3,
+    [M_SWP]    = 1,
+    [M_LEN]    = 2,
+    [M_NEWARR] = 5,
+    [M_IDX]    = 2,
+    [M_STO]    = 3,
+    [M_B]      = 0,
+    [M_E]      = 0,
+    [M_IF]     = 1,
+    [M_JZ]     = 1,
+    [M_JMP]    = 1,
+    [M_RT]     = 2,
+    [M_CL]     = 5,
+    [M_HALT]   = 0,
+    [M_GTWAY]  = 1,
+    [M_WAIT]   = 1,
+    [M_IOW]    = 5,
+    [M_IOR]    = 3,
+    [M_TRACE]  = 1,
+    [M_PH]     = 0
 };
 
 /* =============================================
@@ -684,46 +798,50 @@ static const uint32_t GAS_COST[256] = {
 typedef void (*handler)(M_VM*);
 
 static const handler TABLE[256] = {
-    [M_LIT]   = h_lit,
-    [M_V]     = h_v,
-    [M_LET]   = h_let,
-    [M_SET]   = h_set,
-    [M_ADD]   = h_add,
-    [M_SUB]   = h_sub,
-    [M_MUL]   = h_mul,
-    [M_DIV]   = h_div,
-    [M_AND]   = h_and,
-    [M_OR]    = h_or,
-    [M_XOR]   = h_xor,
-    [M_SHL]   = h_shl,
-    [M_SHR]   = h_shr,
-    [M_LT]    = h_lt,
-    [M_GT]    = h_gt,
-    [M_LE]    = h_le,
-    [M_GE]    = h_ge,
-    [M_EQ]    = h_eq,
-    [M_DUP]   = h_dup,
-    [M_DRP]   = h_drp,
-    [M_SWP]   = h_swp,
-    [M_ROT]   = h_rot,
-    [M_LEN]   = h_len,
-    [M_GET]   = h_get,
-    [M_PUT]   = h_put,
-    [M_B]     = h_b,
-    [M_E]     = h_e,
-    [M_IF]    = h_if,
-    [M_JZ]    = h_jz,
-    [M_JMP]   = h_jmp,
-    [M_FN]    = h_fn,
-    [M_RT]    = h_rt,
-    [M_CL]    = h_cl,
-    [M_HALT]  = h_halt,
-    [M_GTWAY] = h_gtway,
-    [M_WAIT]  = h_wait,
-    [M_IOW]   = h_iow,
-    [M_IOR]   = h_ior,
-    [M_TRACE] = h_trace,
-    [M_PH]    = h_ph
+    [M_LIT]    = h_lit,
+    [M_V]      = h_v,
+    [M_LET]    = h_let,
+    [M_SET]    = h_set,
+    [M_ADD]    = h_add,
+    [M_SUB]    = h_sub,
+    [M_MUL]    = h_mul,
+    [M_DIV]    = h_div,
+    [M_MOD]    = h_mod,
+    [M_AND]    = h_and,
+    [M_OR]     = h_or,
+    [M_XOR]    = h_xor,
+    [M_SHL]    = h_shl,
+    [M_SHR]    = h_shr,
+    [M_LT]     = h_lt,
+    [M_GT]     = h_gt,
+    [M_LE]     = h_le,
+    [M_GE]     = h_ge,
+    [M_EQ]     = h_eq,
+    [M_DUP]    = h_dup,
+    [M_DRP]    = h_drp,
+    [M_ROT]    = h_rot,
+    [M_GET]    = h_get,
+    [M_PUT]    = h_put,
+    [M_SWP]    = h_swp,
+    [M_LEN]    = h_len,
+    [M_NEWARR] = h_newarr,
+    [M_IDX]    = h_idx,
+    [M_STO]    = h_sto,
+    [M_B]      = h_b,
+    [M_E]      = h_e,
+    [M_IF]     = h_if,
+    [M_JZ]     = h_jz,
+    [M_JMP]    = h_jmp,
+    [M_FN]     = h_fn,
+    [M_RT]     = h_rt,
+    [M_CL]     = h_cl,
+    [M_HALT]   = h_halt,
+    [M_GTWAY]  = h_gtway,
+    [M_WAIT]   = h_wait,
+    [M_IOW]    = h_iow,
+    [M_IOR]    = h_ior,
+    [M_TRACE]  = h_trace,
+    [M_PH]     = h_ph
 };
 
 /* =============================================
@@ -750,7 +868,8 @@ void m_vm_init(M_VM* vm, uint8_t* code, int len,
     vm->gas_limit = 0;
     vm->local_count = 0;
     vm->frame_sp = -1;
-    
+    vm->alloc_head = NULL;
+
     vm->io_write = io_w;
     vm->io_read = io_r;
     vm->sleep_ms = sleep;
@@ -774,6 +893,7 @@ void m_vm_reset(M_VM* vm) {
     void (*trace)(uint32_t, const char*) = vm->trace;
     uint64_t step_limit = vm->step_limit;
     uint64_t gas_limit = vm->gas_limit;
+    AllocNode* alloc_head = vm->alloc_head;  /* Keep allocations across reset */
 
     memset(vm, 0, sizeof(M_VM));
     vm->code = code;
@@ -790,6 +910,7 @@ void m_vm_reset(M_VM* vm) {
     vm->gas_limit = gas_limit;
     vm->local_count = 0;
     vm->frame_sp = -1;
+    vm->alloc_head = alloc_head;
 
     vm->io_write = io_w;
     vm->io_read = io_r;
@@ -930,16 +1051,22 @@ int m_vm_call(M_VM* vm, uint32_t func_id, int argc, M_Value* args) {
     for (int i = argc - 1; i >= 0; i--) {
         PUSH(vm, args[i]);
     }
-    
+
     /* Push return address */
-    CHECK_RET_PUSH(vm);
-    vm->ret_stack[vm->rp] = vm->code_len;  /* Return to end */
-    
+    if (vm->rp + 1 >= RET_STACK_SIZE) {
+        SET_FAULT(vm, M_FAULT_RET_STACK_OVERFLOW);
+        return -1;
+    }
+    vm->ret_stack[++vm->rp] = vm->code_len;  /* Return to end */
+
     /* Jump to function */
-    CHECK_PC(vm, func_id);
-    vm->pc = func_id;
+    if (func_id < 0 || func_id >= vm->code_len) {
+        SET_FAULT(vm, M_FAULT_PC_OOB);
+        return -1;
+    }
+    vm->pc = (int)func_id;
     vm->running = true;
-    
+
     return 0;
 }
 
@@ -983,6 +1110,8 @@ const char* m_vm_fault_string(M_Fault fault) {
         case M_FAULT_UNAUTHORIZED:        return "UNAUTHORIZED";
         case M_FAULT_TYPE_MISMATCH:       return "TYPE_MISMATCH";
         case M_FAULT_INDEX_OOB:           return "INDEX_OOB";
+        case M_FAULT_BAD_ARG:             return "BAD_ARG";
+        case M_FAULT_OOM:                 return "OOM";
         case M_FAULT_ASSERT_FAILED:       return "ASSERT_FAILED";
         default:                          return "UNKNOWN";
     }
@@ -1000,52 +1129,56 @@ const char* m_vm_opcode_name(uint32_t op) {
         case M_RT:   return "RT";
         case M_CL:   return "CL";
         case M_PH:   return "PH";
-        
+
         /* Data */
         case M_LIT:  return "LIT";
         case M_V:    return "V";
         case M_LET:  return "LET";
         case M_SET:  return "SET";
-        
+
         /* Comparison */
         case M_LT:   return "LT";
         case M_GT:   return "GT";
         case M_LE:   return "LE";
         case M_GE:   return "GE";
         case M_EQ:   return "EQ";
-        
+
         /* Arithmetic */
         case M_ADD:  return "ADD";
         case M_SUB:  return "SUB";
         case M_MUL:  return "MUL";
         case M_DIV:  return "DIV";
+        case M_MOD:  return "MOD";
         case M_AND:  return "AND";
         case M_OR:   return "OR";
         case M_XOR:  return "XOR";
         case M_SHL:  return "SHL";
         case M_SHR:  return "SHR";
-        
-        /* Array */
-        case M_LEN:  return "LEN";
-        case M_GET:  return "GET";
-        case M_PUT:  return "PUT";
-        case M_SWP:  return "SWP";
-        
+
         /* Stack */
         case M_DUP:  return "DUP";
         case M_DRP:  return "DRP";
         case M_ROT:  return "ROT";
-        
+        case M_SWP:  return "SWP";
+
+        /* Array */
+        case M_GET:    return "GET";
+        case M_PUT:    return "PUT";
+        case M_LEN:    return "LEN";
+        case M_NEWARR: return "NEWARR";
+        case M_IDX:    return "IDX";
+        case M_STO:    return "STO";
+
         /* IO */
         case M_IOW:  return "IOW";
         case M_IOR:  return "IOR";
-        
+
         /* System */
         case M_GTWAY: return "GTWAY";
         case M_WAIT:  return "WAIT";
         case M_HALT:  return "HALT";
         case M_TRACE: return "TRACE";
-        
+
         default:     return "UNK";
     }
 }
@@ -1057,4 +1190,16 @@ int m_vm_stack_snapshot(M_VM* vm, M_Value* out_stack) {
     if (count > STACK_SIZE) count = STACK_SIZE;
     memcpy(out_stack, vm->stack, (size_t)count * sizeof(M_Value));
     return count;
+}
+
+void m_vm_destroy(M_VM* vm) {
+    /* Free all allocated memory */
+    AllocNode* curr = vm->alloc_head;
+    while (curr) {
+        free(curr->ptr);
+        AllocNode* next = curr->next;
+        free(curr);
+        curr = next;
+    }
+    vm->alloc_head = NULL;
 }

@@ -184,19 +184,12 @@ static void disasm_scan_labels(DisasmContext* ctx) {
             case M_SUB:
             case M_MUL:
             case M_DIV:
+            case M_MOD:
             case M_AND:
             case M_OR:
             case M_XOR:
             case M_SHL:
             case M_SHR:
-            case M_LEN:
-            case M_GET:
-            case M_PUT:
-            case M_SWP:
-            case M_DUP:
-            case M_DRP:
-            case M_ROT:
-            case M_RT:
             case M_GTWAY:
             case M_WAIT:
             case M_IOW:
@@ -211,6 +204,20 @@ static void disasm_scan_labels(DisasmContext* ctx) {
                 pc = pc2;
                 break;
             }
+            case M_NEWARR:
+            case M_LEN:
+            case M_IDX:
+            case M_STO:
+            case M_GET:
+            case M_PUT:
+            case M_SWP:
+            case M_DUP:
+            case M_DRP:
+            case M_ROT:
+            case M_RT:
+            case M_E:
+                /* These instructions have no operands */
+                break;
             default:
                 break;
         }
@@ -352,14 +359,15 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
             break;
         
         /* Arithmetic ops */
-        case M_ADD: case M_SUB: case M_MUL: case M_DIV:
+        case M_ADD: case M_SUB: case M_MUL: case M_DIV: case M_MOD:
         case M_AND: case M_OR: case M_XOR:
         case M_SHL: case M_SHR:
             /* No args */
             break;
-        
-        /* Array ops */
-        case M_LEN: case M_GET: case M_PUT: case M_SWP:
+
+        /* Array ops - stack-based, no immediate args */
+        case M_LEN: case M_NEWARR: case M_IDX: case M_STO:
+        case M_GET: case M_PUT: case M_SWP:
             /* Args on stack */
             break;
         
@@ -550,9 +558,10 @@ void m_disasm_print_stack(M_Value* stack, int sp) {
     for (int i = 0; i <= sp && i < 16; i++) {
         if (i > 0) printf(", ");
         switch (stack[i].type) {
-            case M_TYPE_INT:  printf("%d", (int)stack[i].u.i); break;
+            case M_TYPE_INT:   printf("%d", (int)stack[i].u.i); break;
             case M_TYPE_FLOAT: printf("%.2f", (double)stack[i].u.f); break;
             case M_TYPE_BOOL:  printf("%s", stack[i].u.b ? "true" : "false"); break;
+            case M_TYPE_ARRAY: printf("arr[%d]", stack[i].u.array_ptr ? (int)stack[i].u.array_ptr->len : 0); break;
             default:           printf("?"); break;
         }
     }

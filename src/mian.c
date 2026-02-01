@@ -238,6 +238,79 @@ static ByteBuf build_io_demo(void) {
     return b;
 }
 
+/* Program 9: Modulo - test C semantics: a % b (sign matches a) */
+static ByteBuf build_mod_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+
+    /* Test 1: 10 % 3 = 1 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 10);
+    emit_op(&b, M_LIT);  emit_uvar(&b, 3);
+    emit_op(&b, M_MOD);                          /* 10 % 3 = 1 */
+    emit_op(&b, M_DUP);                          /* duplicate result */
+
+    /* Test 2: -5 % 2 = -1 (C semantics: sign matches a) */
+    emit_op(&b, M_DRP);                          /* drop previous */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 5);       /* -5: encode as signed */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 2);
+    emit_op(&b, M_SUB);                          /* -5 = 0 - 5 */
+    emit_op(&b, M_MOD);                          /* -5 % 2 = -1 */
+    emit_op(&b, M_DUP);                          /* duplicate */
+
+    /* Test 3: 5 % -2 = 1 (sign matches a) */
+    emit_op(&b, M_DRP);
+    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
+    emit_op(&b, M_LIT);  emit_uvar(&b, 2);
+    emit_op(&b, M_SUB);                          /* 5 % -2: 5 - (5/(-2))*(-2) = 5 - (-2)*(-2) = 5 - 4 = 1 */
+    emit_op(&b, M_MOD);                          /* 5 % -2 = 1 */
+
+    emit_op(&b, M_HALT);
+    return b;
+}
+
+/* Program 10: Array operations - NEWARR, IDX, STO, LEN */
+static ByteBuf build_array_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+
+    /* Create array of size 3 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 3);      /* size = 3 */
+    emit_op(&b, M_NEWARR);                       /* create array, push ref */
+
+    /* Store values: arr[0] = 42, arr[1] = 99, arr[2] = 77 */
+    emit_op(&b, M_DUP);                          /* dup arr ref */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* idx = 0 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 42);     /* val = 42 */
+    emit_op(&b, M_STO);                          /* store, push arr */
+
+    emit_op(&b, M_DUP);                          /* dup arr ref */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* idx = 1 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 99);     /* val = 99 */
+    emit_op(&b, M_STO);                          /* store, push arr */
+
+    emit_op(&b, M_DUP);                          /* dup arr ref */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 2);      /* idx = 2 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 77);     /* val = 77 */
+    emit_op(&b, M_STO);                          /* store, push arr */
+
+    /* Get length - dup arr first so we keep the reference */
+    emit_op(&b, M_DUP);                          /* dup arr */
+    emit_op(&b, M_DUP);                          /* dup arr again (now have 2 refs) */
+    emit_op(&b, M_LEN);                          /* pop arr, push len (3) - arr still on stack */
+
+    /* Read back values to verify */
+    emit_op(&b, M_DRP);                          /* drop len, keep arr */
+    emit_op(&b, M_DUP);                          /* dup arr */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* idx = 0 */
+    emit_op(&b, M_IDX);                          /* push arr[0] = 42 */
+
+    emit_op(&b, M_DRP);                          /* drop arr */
+    emit_op(&b, M_DUP);                          /* dup arr */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* idx = 1 */
+    emit_op(&b, M_IDX);                          /* push arr[1] = 99 */
+
+    emit_op(&b, M_HALT);
+    return b;
+}
+
 /* =============================================
  * Runner with Disassembly
  * ============================================= */
@@ -271,6 +344,9 @@ static void run_with_disasm(const char* name, ByteBuf* prog, bool do_simulate) {
                (unsigned long long)vm.steps,
                (vm.sp >= 0) ? (int)vm.stack[vm.sp].u.i : 0);
     }
+
+    /* Free allocated memory */
+    m_vm_destroy(&vm);
 }
 
 /* =============================================
@@ -292,7 +368,9 @@ int main(void) {
     ByteBuf p6 = build_bitwise_demo();
     ByteBuf p7 = build_stack_demo();
     ByteBuf p8 = build_io_demo();
-    
+    ByteBuf p9 = build_mod_demo();
+    ByteBuf p10 = build_array_demo();
+
     run_with_disasm("Arithmetic (5 + 3 * 2)", &p1, false);
     run_with_disasm("Comparison (10 > 5)", &p2, false);
     run_with_disasm("Variables (let x=10, y=x+5)", &p3, false);
@@ -301,6 +379,8 @@ int main(void) {
     run_with_disasm("Bitwise (5 & 3, 5 | 3)", &p6, false);
     run_with_disasm("Stack operations", &p7, false);
     run_with_disasm("IO with authorization", &p8, false);
+    run_with_disasm("Modulo (C semantics: 10%3, -5%2, 5%-2)", &p9, false);
+    run_with_disasm("Array (NEWARR, STO, IDX, LEN)", &p10, false);
     
     printf("\n");
     printf("+================================================================+\n");

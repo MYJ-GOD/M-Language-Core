@@ -1,4 +1,4 @@
-# M-Language Core (v1.3)
+# M-Language Core (v1.4)
 
 面向 AI 的极简字节码与虚拟机实现，目标是用可验证、可审计、可授权的指令流连接 AI 与硬件。
 
@@ -8,8 +8,8 @@
 
 M-Language 由三层构成：
 
-1) 意图层：人类或 AI 的高层任务描述  
-2) M-Token 层：全 varint 编码的极简指令序列  
+1) 意图层：人类或 AI 的高层任务描述
+2) M-Token 层：全 varint 编码的极简指令序列
 3) MVM 层：执行与安全约束（step/gas/授权/越界检查）
 
 当前仓库专注于 **M-Token + MVM** 的核心实现与可执行示例。
@@ -24,7 +24,7 @@ M-Language 由三层构成：
 - 安全约束：step limit、gas limit、栈/局部/全局/PC 越界检查
 - 授权机制：GTWAY 指令（授权后单次 IO 生效）
 - 调试工具：字节码反汇编 + 执行追踪摘要
-- 测试套件：8 个示例程序（算术/比较/变量/函数/循环/位运算/栈/IO）
+- 测试套件：9 个示例程序（算术/比较/变量/函数/循环/位运算/栈/IO/数组）
 
 进行中（文档级别已定义，代码后续可逐步补齐）：
 - 更严格的结构化控制流验证
@@ -71,7 +71,7 @@ cl /I include src\m_vm.c src\disasm.c src\mian.c
 
 说明：所有 opcode 与参数均采用 LEB128 varint 编码。下表为**逻辑编号**（即解码后的 opcode 值）。
 
-| 分组 | 指令 | 值 | 作用 |
+|  分组  |  指令  | 值 |  作用  |
 | :-- | :-- | :-- | :-- |
 | Control | `B` / `E` | 10 / 11 | 结构化块起止 |
 | Control | `IF` | 12 | 条件结构：`<cond>,IF,B,<then>,E,B,<else>,E` |
@@ -80,12 +80,14 @@ cl /I include src\m_vm.c src\disasm.c src\mian.c
 | Data | `LIT` | 30 | 字面量入栈 |
 | Data | `V` / `LET` / `SET` | 31 / 32 / 33 | 读局部 / 写局部 / 写全局 |
 | Compare | `LT` `GT` `LE` `GE` `EQ` | 40-44 | 比较指令 |
-| Math | `ADD` `SUB` `MUL` `DIV` | 50-53 | 算术运算 |
-| Bit | `AND` `OR` `XOR` `SHL` `SHR` | 54-58 | 位运算 |
-| Array | `LEN` `GET` `PUT` | 60-62 | 数组长度 / 读 / 写 |
-| Stack | `DUP` `DRP` `ROT` `SWP` | 64-66 / 63 | 栈操作 |
+| Math | `ADD` `SUB` `MUL` `DIV` `MOD` | 50-54 | 算术运算 |
+| Bit | `AND` `OR` `XOR` `SHL` `SHR` | 55-59 | 位运算 |
+| Array | `LEN` `NEWARR` `IDX` `STO` | 60-63 | 数组长度/创建/索引/存储 |
+| Stack | `DUP` `DRP` `ROT` | 64-66 | 栈操作 |
+| Array | `GET` `PUT` | 67-68 | 数组读/写 |
+| Stack | `SWP` | 69 | 交换栈顶两个元素 |
 | IO | `IOW` / `IOR` | 70 / 71 | IO 写 / IO 读 |
-| System | `GTWAY` `WAIT` `TRACE` `HALT` | 80-83 / 82 | 授权 / 延时 / 追踪 / 停止 |
+| System | `GTWAY` `WAIT` `HALT` `TRACE` | 80 / 81 / 82 / 83 | 授权 / 延时 / 停止 / 追踪 |
 
 完整定义见 `include/m_vm.h` 与 `M-Token规范.md`。
 
@@ -93,10 +95,10 @@ cl /I include src\m_vm.c src\disasm.c src\mian.c
 
 ## 指令与执行模型（简述）
 
-- **编码**：所有 opcode 与操作数均为 LEB128 varint  
-- **执行模型**：栈式为主，函数调用使用局部变量帧  
-- **授权**：GTWAY 后允许单次 IOW，执行后授权自动失效  
-- **约束**：step limit + gas limit + 多类边界检查  
+- **编码**：所有 opcode 与操作数均为 LEB128 varint
+- **执行模型**：栈式为主，函数调用使用局部变量帧
+- **授权**：GTWAY 后允许单次 IOW，执行后授权自动失效
+- **约束**：step limit + gas limit + 多类边界检查
 
 更完整说明请看 `M-Token规范.md` 与 `M 语言体系完整大纲.md`。
 

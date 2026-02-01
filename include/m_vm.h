@@ -46,22 +46,30 @@
 #define M_SUB  51   /* Subtraction: a,b -> a-b */
 #define M_MUL  52   /* Multiplication: a,b -> a*b */
 #define M_DIV  53   /* Division: a,b -> a/b */
-#define M_AND  54   /* Bitwise AND: a,b -> a&b */
-#define M_OR   55   /* Bitwise OR: a,b -> a|b */
-#define M_XOR  56   /* Bitwise XOR: a,b -> a^b */
-#define M_SHL  57   /* Shift left: a,b -> a<<b */
-#define M_SHR  58   /* Shift right: a,b -> a>>b */
+#define M_MOD  54   /* Modulo: a,b -> a%b (C semantics: sign matches a) */
+#define M_AND  55   /* Bitwise AND: a,b -> a&b */
+#define M_OR   56   /* Bitwise OR: a,b -> a|b */
+#define M_XOR  57   /* Bitwise XOR: a,b -> a^b */
+#define M_SHL  58   /* Shift left: a,b -> a<<b */
+#define M_SHR  59   /* Shift right: a,b -> a>>b */
 
 /* --- Array Operations (60-63) --- */
-#define M_LEN  60   /* Array length: <array_ref> -> <length> */
-#define M_GET  61   /* Array get: <array_ref>,<index> -> <element> */
-#define M_PUT  62   /* Array put: <array_ref>,<index>,<value> -> <array_ref> */
-#define M_SWP  63   /* Swap: a,b -> b,a (swap top two) */
+#define M_LEN    60   /* Array length: <array_ref> -> <length> */
+#define M_NEWARR 61   /* Array create: <size> -> <array_ref> */
+#define M_IDX    62   /* Array index: <array_ref>,<index> -> <element> */
+#define M_STO    63   /* Array store: <array_ref>,<index>,<value> -> <array_ref> */
 
-/* --- Stack Operations (64-69) --- */
+/* --- Stack Operations (64-66) --- */
 #define M_DUP  64   /* Duplicate top: a -> a,a */
 #define M_DRP  65   /* Drop top: a -> (pop) */
 #define M_ROT  66   /* Rotate top 3: a,b,c -> b,c,a */
+
+/* --- Additional Array Operations (67-68) --- */
+#define M_GET  67   /* Array get: <array_ref>,<index> -> <element> */
+#define M_PUT  68   /* Array put: <array_ref>,<index>,<value> -> <array_ref> */
+
+/* --- Swap (69) --- */
+#define M_SWP  69   /* Swap: a,b -> b,a (swap top two) */
 
 /* --- Hardware IO (70-79) --- */
 #define M_IOW  70   /* IO Write: IOW,<device_id>,<value> */
@@ -100,6 +108,8 @@ typedef enum {
     M_FAULT_UNAUTHORIZED,
     M_FAULT_TYPE_MISMATCH,
     M_FAULT_INDEX_OOB,
+    M_FAULT_BAD_ARG,        /* Invalid argument (e.g., negative size) */
+    M_FAULT_OOM,            /* Out of memory */
     M_FAULT_ASSERT_FAILED
 } M_Fault;
 
@@ -150,20 +160,30 @@ typedef enum {
 typedef struct M_Value {
     M_Type   type;
     union {
-        int32_t  i;
-        float    f;
-        bool     b;
-        struct {
-            int32_t* data;
-            int32_t  len;
-        } arr;
+        int32_t        i;
+        float          f;
+        bool           b;
+        struct M_Array* array_ptr;  /* Pointer to M_Array */
         struct {
             const char* str;
-            int32_t    len;
+            int32_t     len;
         } s;
-        void*    ref;
+        void*          ref;
     } u;
 } M_Value;
+
+/* --- M Array (dynamic array) --- */
+typedef struct M_Array {
+    int32_t  len;           /* Number of elements */
+    int32_t  cap;           /* Capacity */
+    M_Value  data[];        /* Flexible array member - stores M_Value elements */
+} M_Array;
+
+/* --- Allocation tracking node --- */
+typedef struct AllocNode {
+    void*            ptr;
+    struct AllocNode* next;
+} AllocNode;
 
 /* --- VM Structure --- */
 typedef struct M_VM {
@@ -186,6 +206,9 @@ typedef struct M_VM {
 
     /* Globals */
     M_Value  globals[GLOBALS_SIZE];
+
+    /* Memory allocation tracking */
+    AllocNode* alloc_head;
 
     /* State */
     bool     running;
@@ -249,6 +272,9 @@ const char* m_vm_fault_string(M_Fault fault);
 const char* m_vm_opcode_name(uint32_t op);
 
 int m_vm_stack_snapshot(M_VM* vm, M_Value* out_stack);
+
+/* Destroy VM and free all allocated memory */
+void m_vm_destroy(M_VM* vm);
 
 /* =============================================
  * High-Level API (M-Token format support)
