@@ -1,0 +1,75 @@
+# ========================
+# 编译产物 (Build artifacts)
+# ========================
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.out
+*.app
+*.i
+*.s
+
+# ========================
+# 调试与中间文件 (Debug & Intermediate)
+# ========================
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.res
+*.pch
+*.tlog
+*.lastbuildstate
+*.recipe
+*.iobj
+*.ipdb
+*.dSYM/
+
+# ========================
+# Visual Studio 核心忽略项
+# ========================
+.vs/
+x64/
+x86/
+Debug/
+Release/
+ARM/
+ARM64/
+*.user
+*.suo
+*.log
+*.userosscache
+*.sln.docstates
+*.opendb
+*.db
+*.ipch
+
+# ========================
+# 其他编辑器/IDE 配置
+# ========================
+# VS Code
+.vscode/
+# IntelliJ IDEA
+.idea/
+# CLion
+cmake-build-*/
+
+# ========================
+# 系统文件 (OS files)
+# ========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========================
+# 构建目录 (General Build dirs)
+# ========================
+build/
+bin/
+out/
+obj/
