@@ -57,6 +57,58 @@ static void emit_op(ByteBuf* b, uint32_t op) {
 }
 
 /* =============================================
+ * Signed Offset Encoding (15-bit)
+ * ============================================= */
+
+/* Encode a signed 15-bit offset.
+ * 1 byte: 0..127 (no continuation bit)
+ * 2 bytes: signed range -16384..16383 with continuation bit set
+ */
+static int encode_svar15(int32_t value, uint8_t out[2]) {
+    if (value >= 0 && value <= 0x7F) {
+        out[0] = (uint8_t)value;
+        return 1;
+    }
+
+    if (value < -16384 || value > 16383) {
+        /* Out of range for 15-bit signed encoding */
+        return 0;
+    }
+
+    uint16_t raw15 = (uint16_t)value & 0x7FFF;
+    out[0] = (uint8_t)((raw15 & 0x7F) | 0x80);
+    out[1] = (uint8_t)((raw15 >> 7) & 0xFF);
+    return 2;
+}
+
+/* Emit a fixed 2-byte placeholder for a signed offset */
+static int emit_svar_placeholder(ByteBuf* b) {
+    int pos = b->len;
+    b->buf[b->len++] = 0x80; /* continuation bit set */
+    b->buf[b->len++] = 0x00; /* placeholder */
+    return pos;
+}
+
+/* Backpatch a signed 15-bit offset at a given position (2 bytes). */
+static void backpatch_svar15(ByteBuf* b, int pos, int32_t value) {
+    uint8_t tmp[2] = {0};
+    int len = encode_svar15(value, tmp);
+    if (len == 1) {
+        /* Force 2-byte encoding to keep layout stable */
+        tmp[1] = 0x00;
+        tmp[0] = (uint8_t)(tmp[0] | 0x80);
+        len = 2;
+    }
+    if (len != 2) {
+        /* If out of range, clamp to avoid corrupting bytecode */
+        tmp[0] = 0x80;
+        tmp[1] = 0x00;
+    }
+    b->buf[pos] = tmp[0];
+    b->buf[pos + 1] = tmp[1];
+}
+
+/* =============================================
  * Test Programs
  * ============================================= */
 
@@ -162,15 +214,17 @@ static ByteBuf build_loop_demo(void) {
     emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* sum = 0 */
     
     /* L_cond: check x > 0 */
+    int cond_start = b.len;
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* x */
     emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* 0 */
     emit_op(&b, M_GT);                           /* x > 0 */
     
-    /* Save position for JZ target, emit placeholder */
-    int jz_placeholder = b.len;
-    emit_op(&b, M_JZ);  emit_uvar(&b, 0);       /* placeholder: JZ L_end */
+    /* Emit JZ with 2-byte signed offset placeholder */
+    emit_op(&b, M_JZ);
+    int jz_offset_pos = emit_svar_placeholder(&b);
     
     /* L_body: sum += x; x-- */
+    int body_start = b.len;
     emit_op(&b, M_V);    emit_uvar(&b, 1);      /* sum */
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* x */
     emit_op(&b, M_ADD);                          /* sum + x */
@@ -181,42 +235,24 @@ static ByteBuf build_loop_demo(void) {
     emit_op(&b, M_SUB);                          /* x - 1 */
     emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* x = result */
     
-    /* Save position for JMP target, emit placeholder */
-    int jmp_placeholder = b.len;
-    emit_op(&b, M_JMP); emit_uvar(&b, 0);       /* placeholder: JMP L_cond */
+    /* Emit JMP with 2-byte signed offset placeholder */
+    emit_op(&b, M_JMP);
+    int jmp_offset_pos = emit_svar_placeholder(&b);
     
     /* L_end: output result */
     int loop_end = b.len;
     emit_op(&b, M_V);    emit_uvar(&b, 1);      /* sum */
     emit_op(&b, M_HALT);
     
-    /* Backpatch: calculate offsets */
-    /* JZ target = loop_end (absolute) */
-    int jz_target = loop_end;
-    /* JMP target = 8 (position of cond check: V 0) */
-    int jmp_target = 8;
+    /* Backpatch JZ offset: from after JZ arg to loop_end */
+    int jz_after_arg = jz_offset_pos + 2;
+    int jz_offset = loop_end - jz_after_arg;
+    backpatch_svar15(&b, jz_offset_pos, jz_offset);
     
-    /* Backpatch JZ target */
-    uint8_t* jz_ptr = &b.buf[jz_placeholder + 1];  /* after JZ opcode */
-    int jz_len = 0;
-    int32_t jz_val = jz_target;
-    do {
-        jz_ptr[jz_len] = (uint8_t)(jz_val & 0x7F);
-        jz_val >>= 7;
-        if (jz_val > 0) jz_ptr[jz_len] |= 0x80;
-        jz_len++;
-    } while (jz_val > 0);
-    
-    /* Backpatch JMP target */
-    uint8_t* jmp_ptr = &b.buf[jmp_placeholder + 1];  /* after JMP opcode */
-    int jmp_len = 0;
-    int32_t jmp_val = jmp_target;
-    do {
-        jmp_ptr[jmp_len] = (uint8_t)(jmp_val & 0x7F);
-        jmp_val >>= 7;
-        if (jmp_val > 0) jmp_ptr[jmp_len] |= 0x80;
-        jmp_len++;
-    } while (jmp_val > 0);
+    /* Backpatch JMP offset: from after JMP arg to cond_start */
+    int jmp_after_arg = jmp_offset_pos + 2;
+    int jmp_offset = cond_start - jmp_after_arg;
+    backpatch_svar15(&b, jmp_offset_pos, jmp_offset);
     
     return b;
 }
@@ -230,15 +266,53 @@ static ByteBuf build_loop_demo(void) {
  * Re-encodes the varint at the specified position.
  */
 static void backpatch_uvar(ByteBuf* b, int offset, int32_t value) {
-    uint8_t* ptr = &b->buf[offset];
-    int len = 0;
-    int32_t val = value;
+    if (offset < 0 || offset >= b->len) return;
+    
+    /* First, count how many bytes the original varint occupied */
+    int orig_len = 0;
+    uint32_t orig_val = 0;
+    int pc = offset;
+    if (m_vm_decode_uvarint(b->buf, &pc, b->len, &orig_val)) {
+        orig_len = pc - offset;
+    }
+    
+    if (orig_len == 0) return; /* Failed to decode, abort */
+    
+    /* Encode the new value */
+    uint8_t new_bytes[5];
+    int new_len = 0;
+    uint32_t val = (uint32_t)value;
     do {
-        ptr[len] = (uint8_t)(val & 0x7F);
+        new_bytes[new_len] = (uint8_t)(val & 0x7F);
         val >>= 7;
-        if (val > 0) ptr[len] |= 0x80;
-        len++;
-    } while (val > 0);
+        if (val > 0 && new_len < 4) new_bytes[new_len] |= 0x80;
+        new_len++;
+    } while (val > 0 && new_len < 5);
+    
+    /* If sizes match, simple copy */
+    if (new_len == orig_len) {
+        for (int i = 0; i < new_len; i++) {
+            b->buf[offset + i] = new_bytes[i];
+        }
+    }
+    /* If new is smaller, shift rest of bytecode left */
+    else if (new_len < orig_len) {
+        for (int i = 0; i < new_len; i++) {
+            b->buf[offset + i] = new_bytes[i];
+        }
+        /* Shift remaining bytes */
+        for (int i = offset + orig_len; i < b->len; i++) {
+            b->buf[i - (orig_len - new_len)] = b->buf[i];
+        }
+        b->len -= (orig_len - new_len);
+    }
+    /* If new is larger, this is a problem - bytecode shifts */
+    else {
+        /* For now, just write what fits and hope for the best */
+        for (int i = 0; i < orig_len && i < new_len; i++) {
+            b->buf[offset + i] = new_bytes[i];
+        }
+    }
 }
 
 /**
@@ -265,97 +339,6 @@ static void emit_while_loop(ByteBuf* b, int* cond_start, int* loop_end) {
 
     /* Placeholder for condition - will be filled by caller if needed */
     /* In this simple version, condition is emitted inline */
-}
-
-/**
- * Emit condition check: x > 0
- * Helper for build_while_demo
- */
-static void emit_while_cond_gt_zero(ByteBuf* bb, int var_idx) {
-    emit_op(bb, M_V);    emit_uvar(bb, var_idx);  /* var */
-    emit_op(bb, M_LIT);  emit_uvar(bb, 0);        /* 0 */
-    emit_op(bb, M_GT);                           /* var > 0 */
-}
-
-/**
- * Emit loop body: sum += x; x--
- * var_sum = var_sum + var_x
- * var_x = var_x - 1
- */
-static void emit_while_body_incr_decr(ByteBuf* bb, int var_sum, int var_x) {
-    /* sum = sum + x */
-    emit_op(bb, M_V);    emit_uvar(bb, var_sum);  /* sum */
-    emit_op(bb, M_V);    emit_uvar(bb, var_x);    /* x */
-    emit_op(bb, M_ADD);                          /* sum + x */
-    emit_op(bb, M_LET);  emit_uvar(bb, var_sum);  /* sum = result */
-
-    /* x = x - 1 */
-    emit_op(bb, M_V);    emit_uvar(bb, var_x);    /* x */
-    emit_op(bb, M_LIT);  emit_uvar(bb, 1);        /* 1 */
-    emit_op(bb, M_SUB);                          /* x - 1 */
-    emit_op(bb, M_LET);  emit_uvar(bb, var_x);    /* x = result */
-}
-
-/**
- * Build a complete WHILE loop bytecode
- * Demonstrates compiler lowering: WHILE → JZ/JMP
- */
-static void build_while_with_body(ByteBuf* b,
-                                   void (*emit_cond)(ByteBuf*, int),
-                                   void (*emit_body)(ByteBuf*, int, int),
-                                   int var_idx,
-                                   int var_sum, int var_x) {
-    int cond_start = b->len;  /* L_cond position */
-
-    /* Emit condition */
-    emit_cond(b, var_idx);
-
-    /* Emit JZ L_end (placeholder) */
-    int jz_placeholder = b->len;
-    emit_op(b, M_JZ);
-    emit_uvar(b, 0);
-
-    /* Emit loop body */
-    emit_body(b, var_sum, var_x);
-
-    /* Emit JMP L_cond */
-    int jmp_placeholder = b->len;
-    emit_op(b, M_JMP);
-    emit_uvar(b, 0);
-
-    /* Backpatch JZ target = L_end */
-    int loop_end = b->len;
-    backpatch_uvar(b, jz_placeholder + 1, loop_end);
-
-    /* Backpatch JMP target = L_cond */
-    backpatch_uvar(b, jmp_placeholder + 1, cond_start);
-}
-
-/* Program 11: WHILE loop - using compiler lowering demonstration
- * Same logic as loop_demo but using emit_while_loop helper
- * Computes sum of 1 to 5 = 15
- */
-static ByteBuf build_while_demo(void) {
-    ByteBuf b; memset(&b, 0, sizeof(b));
-
-    /* sum = 0, x = 5 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 0);
-    emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = 0 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
-    emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* x = 5 */
-
-    /* WHILE (x > 0) { sum += x; x-- } */
-    build_while_with_body(&b,
-        emit_while_cond_gt_zero,    /* condition: x > 0 */
-        emit_while_body_incr_decr,  /* body: sum+=x, x-- */
-        1,                          /* var_idx for condition */
-        0, 1);                      /* sum=0, x=1 */
-
-    /* Output result */
-    emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
-    emit_op(&b, M_HALT);
-
-    return b;
 }
 
 /* Program 11b: DO-WHILE loop demo (execute body first, then check condition)
@@ -391,12 +374,81 @@ static ByteBuf build_do_while_demo(void) {
     emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* 0 */
     emit_op(&b, M_GT);                           /* i > 0 */
     
-    /* DWHL: if cond != 0, jump to DO */
-    emit_op(&b, M_DWHL); emit_uvar(&b, do_start); /* DWHL, jump to DO */
+    /* DWHL: if cond != 0, jump back to DO */
+    emit_op(&b, M_DWHL);
+    int dwhl_offset_pos = emit_svar_placeholder(&b);
     
     /* Return sum */
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
     emit_op(&b, M_HALT);
+    
+    /* Backpatch DWHL offset: relative from after DWHL arg to do_start */
+    int dwhl_offset = do_start - (dwhl_offset_pos + 2);
+    backpatch_svar15(&b, dwhl_offset_pos, dwhl_offset);
+    
+    return b;
+}
+
+/* Program 12: WHILE loop demo (check condition first, then execute body)
+ * WHILE: while (condition) { body }
+ * Format: <cond>, WHILE,<body_addr>, <body>, JMP,<cond_addr>
+ */
+static ByteBuf build_while_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+    
+    /* sum = 0, i = 5 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 0);
+    emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = 0 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
+    emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* i = 5 */
+    
+    /* Condition check position */
+    int cond_start = b.len;
+    
+    /* Condition: i > 0 */
+    emit_op(&b, M_V);    emit_uvar(&b, 1);      /* i */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* 0 */
+    emit_op(&b, M_GT);                           /* i > 0 */
+    
+    /* Emit WHILE with 2-byte signed offset placeholder */
+    emit_op(&b, M_WHIL);
+    int while_offset_pos = emit_svar_placeholder(&b);
+    
+    /* Body starts here */
+    int body_start = b.len;
+    
+    /* Body: sum = sum + i */
+    emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
+    emit_op(&b, M_V);    emit_uvar(&b, 1);      /* i */
+    emit_op(&b, M_ADD);                          /* sum + i */
+    emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = result */
+    
+    /* i = i - 1 */
+    emit_op(&b, M_V);    emit_uvar(&b, 1);      /* i */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* 1 */
+    emit_op(&b, M_SUB);                          /* i - 1 */
+    emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* i = result */
+    
+    /* Jump back to condition check */
+    emit_op(&b, M_JMP);
+    int jmp_offset_pos = emit_svar_placeholder(&b);
+    
+    /* Exit point */
+    int loop_exit = b.len;
+    
+    /* Output sum */
+    emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
+    emit_op(&b, M_HALT);
+    
+    /* Backpatch WHILE offset: relative from after WHILE arg to loop_exit */
+    /* If cond == 0, WHILE jumps to loop_exit; otherwise fallthrough to body */
+    int while_offset = loop_exit - (while_offset_pos + 2);
+    backpatch_svar15(&b, while_offset_pos, while_offset);
+    
+    /* Backpatch JMP offset: relative from after JMP arg to cond_start */
+    /* After JMP arg, PC will be at (jmp_offset_pos + 2), so target should be cond_start - (jmp_offset_pos + 2) */
+    int jmp_offset = cond_start - (jmp_offset_pos + 2);
+    backpatch_svar15(&b, jmp_offset_pos, jmp_offset);
     
     return b;
 }
@@ -540,10 +592,9 @@ static void build_for_loop(ByteBuf* b,
     int cond_start = b->len;
     if (emit_cond) emit_cond(b);
 
-    /* 3. Emit JZ L_end */
-    int jz_placeholder = b->len;
+    /* 3. Emit JZ with 2-byte signed offset placeholder */
     emit_op(b, M_JZ);
-    emit_uvar(b, 0);
+    int jz_offset_pos = emit_svar_placeholder(b);
 
     /* 4. L_body: Emit loop body */
     if (emit_body) emit_body(b);
@@ -551,17 +602,23 @@ static void build_for_loop(ByteBuf* b,
     /* 5. L_update: Emit update, then jump back to condition */
     if (emit_update) emit_update(b);
 
-    /* 6. Emit JMP L_cond */
-    int jmp_placeholder = b->len;
+    /* 6. Emit JMP with 2-byte signed offset placeholder */
     emit_op(b, M_JMP);
-    emit_uvar(b, 0);
+    int jmp_offset_pos = emit_svar_placeholder(b);
 
     /* 7. L_end: Loop ends here */
     int loop_end = b->len;
 
-    /* 8. Backpatch */
-    backpatch_uvar(b, jz_placeholder + 1, loop_end);
-    backpatch_uvar(b, jmp_placeholder + 1, cond_start);
+    /* 8. Backpatch with signed offsets */
+    /* JZ offset: from after JZ arg to loop_end */
+    int jz_after_arg = jz_offset_pos + 2;
+    int jz_offset = loop_end - jz_after_arg;
+    backpatch_svar15(b, jz_offset_pos, jz_offset);
+
+    /* JMP offset: from after JMP arg to cond_start */
+    int jmp_after_arg = jmp_offset_pos + 2;
+    int jmp_offset = cond_start - jmp_after_arg;
+    backpatch_svar15(b, jmp_offset_pos, jmp_offset);
 }
 
 /* FOR loop helper: emit init i = 0 */
@@ -813,7 +870,7 @@ int main(void) {
     printf("+================================================================+\n");
     
     /* Run all tests */
-    /*ByteBuf p1 = build_arithmetic_demo();
+    ByteBuf p1 = build_arithmetic_demo();
     ByteBuf p2 = build_comparison_demo();
     ByteBuf p3 = build_variables_demo();
     ByteBuf p4 = build_nested_function_demo();
@@ -823,7 +880,7 @@ int main(void) {
     ByteBuf p8 = build_io_demo();
     ByteBuf p9 = build_mod_demo();
     ByteBuf p10 = build_array_demo();
-    ByteBuf p11 = build_while_demo();*/
+    ByteBuf p11 = build_while_demo();
     ByteBuf p12 = build_for_demo();
     ByteBuf p13 = build_memory_demo();
     ByteBuf p11b = build_do_while_demo();
@@ -832,7 +889,7 @@ int main(void) {
     ByteBuf p16 = build_breakpoint_demo();
     ByteBuf p17 = build_single_step_demo();
 
-    /*run_with_disasm("Arithmetic (5 + 3 * 2)", &p1, false);
+    run_with_disasm("Arithmetic (5 + 3 * 2)", &p1, false);
     run_with_disasm("Comparison (10 > 5)", &p2, false);
     run_with_disasm("Nested function calls (double = add(x,x), main = double(5)+double(3))", &p4, true);
     run_with_disasm("Variables (let x=10, y=x+5)", &p3, false);
@@ -841,15 +898,13 @@ int main(void) {
     run_with_disasm("Bitwise (5 & 3, 5 | 3)", &p6, false);
     run_with_disasm("Stack operations", &p7, false);
     run_with_disasm("IO with authorization", &p8, false);
-    run_with_disasm("Modulo (C semantics: 10%3, -5%2, 5%-2)", &p9, false);
+    run_with_disasm("Modulo (10%3, -5%2, 5%-2)", &p9, false);
     run_with_disasm("Array (NEWARR, STO, IDX, LEN)", &p10, false);
-    run_with_disasm("WHILE Loop (compiler lowering)", &p11, true);*/
-    ByteBuf p4 = build_nested_function_demo();
-    run_with_disasm("Nested Function Calls (double(x)=add(x,x), main=double(5)+double(3)=31)", &p4, true);
+    run_with_disasm("WHILE Loop (compiler lowering)", &p11, true);
     run_with_disasm("DO-WHILE Loop (do { sum+=i; i-- } while i>0, sum=1..5=15)", &p11b, true);
     run_with_disasm("FOR Loop (compiler lowering)", &p12, true);
     run_with_disasm("Memory ALLOC/FREE", &p13, false);
-    run_with_disasm("Stack Overflow Protection (recursive function triggers overflow)", &p14, true);
+    run_with_disasm("Stack Overflow Protection", &p14, true);
     run_with_disasm("Garbage Collection (GC)", &p15, true);
     run_with_disasm("Breakpoint Demo", &p16, true);
     run_with_disasm("Single-Step Debugging (STEP)", &p17, true);

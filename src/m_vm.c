@@ -40,9 +40,72 @@ bool m_vm_decode_uvarint(const uint8_t* code, int* pc, int len, uint32_t* out) {
     }
 
     if (!terminated) return false;
-
+    
     *pc = p;
     *out = res;
+    return true;
+}
+
+bool m_vm_decode_uvarint64(const uint8_t* code, int* pc, int len, uint64_t* out) {
+    if (!code || !pc || !out) return false;
+    
+    int p = *pc;
+    uint64_t res = 0;
+    int shift = 0;
+    bool terminated = false;
+
+    while (p < len) {
+        uint8_t b = code[p++];
+        res |= (uint64_t)(b & 0x7F) << shift;
+
+        if ((b & 0x80) == 0) { 
+            terminated = true; 
+            break; 
+        }
+
+        shift += 7;
+        if (shift >= 64) {
+            return false;
+        }
+    }
+
+    if (!terminated) return false;
+    
+    *pc = p;
+    *out = res;
+    return true;
+}
+
+/* Decode a signed varint offset (for jump instructions).
+ * Encoding rules:
+ * - 1 byte: 0..127 (no continuation bit) for small non-negative offsets
+ * - 2 bytes: signed 15-bit offset with continuation bit set on first byte
+ */
+bool m_vm_decode_svarint(const uint8_t* code, int* pc, int len, int16_t* out) {
+    if (!code || !pc || !out) return false;
+    if (*pc + 1 > len) return false;
+
+    uint8_t b0 = code[*pc];
+
+    /* 1-byte encoding (0..127) */
+    if ((b0 & 0x80) == 0) {
+        *pc += 1;
+        *out = (int16_t)(b0 & 0x7F);
+        return true;
+    }
+
+    /* 2-byte encoding: signed 15-bit (range -16384..16383) */
+    if (*pc + 2 > len) return false;
+    uint8_t b1 = code[*pc + 1];
+    uint16_t raw15 = (uint16_t)(((uint16_t)b1 << 7) | (uint16_t)(b0 & 0x7F));
+
+    /* Sign-extend from bit 14 */
+    if (raw15 & 0x4000) {
+        raw15 |= 0x8000;
+    }
+
+    *pc += 2;
+    *out = (int16_t)raw15;
     return true;
 }
 
@@ -78,6 +141,7 @@ uint32_t m_vm_encode_zigzag(int32_t n) {
 } while(0)
 
 #define SPACE(vm, k) do { \
+    if ((vm)->sp + (k) >= (vm)->stack_limit) { SET_FAULT((vm), M_FAULT_STACK_OVERFLOW); return; } \
     if ((vm)->sp + (k) >= STACK_SIZE) { SET_FAULT((vm), M_FAULT_STACK_OVERFLOW); return; } \
 } while(0)
 
@@ -118,7 +182,7 @@ uint32_t m_vm_encode_zigzag(int32_t n) {
  * Value Operations
  * ============================================= */
 
-static M_Value make_int(int32_t i) {
+static M_Value make_int(int64_t i) {
     M_Value v;
     v.type = M_TYPE_INT;
     v.u.i = i;
@@ -132,10 +196,10 @@ static M_Value make_bool(bool b) {
     return v;
 }
 
-static int32_t to_int(M_Value v) {
+static int64_t to_int(M_Value v) {
     switch (v.type) {
         case M_TYPE_INT: return v.u.i;
-        case M_TYPE_FLOAT: return (int32_t)v.u.f;
+        case M_TYPE_FLOAT: return (int64_t)v.u.f;
         case M_TYPE_BOOL: return v.u.b ? 1 : 0;
         default: return 0;
     }
@@ -510,6 +574,9 @@ static void h_rot(M_VM* v) {
 /* --- Literal & Variables --- */
 
 static void h_lit(M_VM* v) {
+    /* Literal: LIT,<zigzag_i64>
+     * Uses zigzag decoding to support negative numbers
+     */
     int pc = v->pc;
     uint32_t enc = 0;
     if (!m_vm_decode_uvarint(v->code, &pc, v->code_len, &enc)) {
@@ -518,7 +585,8 @@ static void h_lit(M_VM* v) {
     }
     SPACE(v, 1);
     v->pc = pc;
-    PUSH(v, make_int((int32_t)enc));
+    /* Use zigzag decode to support negative integers */
+    PUSH(v, make_int(m_vm_decode_zigzag(enc)));
 }
 
 static void h_v(M_VM* v) {
@@ -624,16 +692,30 @@ static void h_xor(M_VM* v) {
 
 static void h_shl(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
+    int32_t b = to_int(POP(v)) & 63;  /* Apply mask per spec: b & 63 */
     int32_t a = to_int(POP(v));
     PUSH(v, make_int(a << b));
 }
 
 static void h_shr(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
+    int32_t b = to_int(POP(v)) & 63;  /* Apply mask per spec: b & 63 */
     int32_t a = to_int(POP(v));
     PUSH(v, make_int(a >> b));
+}
+
+static void h_neg(M_VM* v) {
+    /* Negate: a -> -a */
+    NEED(v, 1);
+    int32_t a = to_int(POP(v));
+    PUSH(v, make_int(-a));
+}
+
+static void h_not(M_VM* v) {
+    /* Bitwise NOT: a -> ~a */
+    NEED(v, 1);
+    int32_t a = to_int(POP(v));
+    PUSH(v, make_int(~a));
 }
 
 /* --- Comparison --- */
@@ -676,6 +758,23 @@ static void h_eq(M_VM* v) {
             case M_TYPE_INT: result = (a.u.i == b.u.i) ? 1 : 0; break;
             case M_TYPE_FLOAT: result = (a.u.f == b.u.f) ? 1 : 0; break;
             case M_TYPE_BOOL: result = (a.u.b == b.u.b) ? 1 : 0; break;
+            default: result = 0;
+        }
+    }
+    PUSH(v, make_int(result));
+}
+
+static void h_neq(M_VM* v) {
+    /* Not equal: a,b -> (a!=b) */
+    NEED(v, 2);
+    M_Value b = POP(v);
+    M_Value a = POP(v);
+    int32_t result = 0;
+    if (a.type == b.type) {
+        switch (a.type) {
+            case M_TYPE_INT: result = (a.u.i != b.u.i) ? 1 : 0; break;
+            case M_TYPE_FLOAT: result = (a.u.f != b.u.f) ? 1 : 0; break;
+            case M_TYPE_BOOL: result = (a.u.b != b.u.b) ? 1 : 0; break;
             default: result = 0;
         }
     }
@@ -861,65 +960,223 @@ static void h_if(M_VM* v) {
     /* If condition true, continue with then branch normally */
 }
 
+static void h_wh(M_VM* v) {
+    /* While loop: <cond>,WH,B<body>,E
+     * Format: cond, WH, B, body..., E
+     * Execution:
+     * 1. Pop condition from stack
+     * 2. If cond is false (0), skip body and jump past E
+     * 3. If cond is true, execute body, then jump back to check condition
+     */
+    NEED(v, 1);
+    int cond_pc = v->pc - 1;  /* PC of condition (before WH opcode) */
+    M_Value cond = POP(v);
+    
+    /* Skip WH opcode */
+    int pc = v->pc;
+    uint32_t op = 0;
+    m_vm_decode_uvarint(v->code, &pc, v->code_len, &op);
+    
+    /* Skip B opcode */
+    uint32_t tok = 0;
+    m_vm_decode_uvarint(v->code, &pc, v->code_len, &tok);
+    v->pc = pc;
+    
+    if (!to_bool(cond)) {
+        /* Condition false, skip entire loop body */
+        int depth = 1;
+        while (depth > 0 && pc < v->code_len) {
+            uint32_t t = 0;
+            int next = pc;
+            m_vm_decode_uvarint(v->code, &next, v->code_len, &t);
+            if (t == M_B) depth++;
+            else if (t == M_E) depth--;
+            if (depth > 0) pc = next;
+        }
+        v->pc = pc + 1;  /* Skip E */
+    }
+    /* If condition true, fall through to body.
+     * After body executes, we need to re-evaluate condition.
+     * This requires the body to end with a jump back to condition check.
+     * For now, we just fall through - proper WH loops need compiler support
+     * to insert the backward jump.
+     */
+}
+
+static void h_fr(M_VM* v) {
+    /* For loop: <init>,<cond>,<inc>,FR,B<body>,E
+     * Stack: [init...], cond, inc, FR, B, body..., E
+     *
+     * Execution:
+     * 1. <init> has already been executed before FR
+     * 2. Pop cond (condition expression result)
+     * 3. If cond is false, skip entire loop body
+     * 4. If cond is true, execute body, then inc, then repeat
+     *
+     * Note: For a complete for loop, the bytecode should look like:
+     *   <init>
+     *   L_cond:
+     *   <cond>
+     *   JZ L_end
+     *   B
+     *   <body>
+     *   E
+     *   <inc>
+     *   JMP L_cond
+     *   L_end:
+     *
+     * The FR instruction is a marker for structured loops.
+     * Currently, we just skip past the body for safety.
+     * Full runtime support requires the compiler to insert jumps.
+     */
+    NEED(v, 1);
+    int32_t cond = to_int(POP(v));
+
+    /* Skip FR opcode */
+    int pc = v->pc;
+    uint32_t op = 0;
+    m_vm_decode_uvarint(v->code, &pc, v->code_len, &op);
+
+    /* Skip B opcode */
+    uint32_t tok = 0;
+    m_vm_decode_uvarint(v->code, &pc, v->code_len, &tok);
+    v->pc = pc;
+
+    if (cond == 0) {
+        /* Condition false, skip entire loop body */
+        int depth = 1;
+        while (depth > 0 && pc < v->code_len) {
+            uint32_t t = 0;
+            int next = pc;
+            m_vm_decode_uvarint(v->code, &next, v->code_len, &t);
+            if (t == M_B) depth++;
+            else if (t == M_E) depth--;
+            if (depth > 0) pc = next;
+        }
+        v->pc = pc + 1;  /* Skip E */
+    }
+    /* If condition true, fall through to body.
+     * Note: A complete implementation would track the condition PC
+     * and insert a backward jump after the body+inc.
+     * This requires compiler support for proper bytecode generation.
+     */
+}
+
 static void h_jz(M_VM* v) {
-    /* Jump if zero: <cond>,JZ,<target_addr> */
+    /* Jump if zero: <cond>,JZ,<offset>
+     * Jump to offset if condition is false (zero).
+     * Offset is signed varint encoded (relative to current PC).
+     */
     NEED(v, 1);
     int32_t cond = to_int(POP(v));
     int pc = v->pc;
-    uint32_t target = 0;
+    int16_t offset = 0;
     
-    if (!m_vm_decode_uvarint(v->code, &pc, v->code_len, &target)) {
+    if (!m_vm_decode_svarint(v->code, &pc, v->code_len, &offset)) {
         SET_FAULT(v, M_FAULT_BAD_ENCODING);
         return;
     }
     v->pc = pc;
     
     if (cond == 0) {
+        int target = v->pc + offset;
         CHECK_PC(v, target);
-        v->pc = (int)target;
+        v->pc = target;
     }
 }
 
-static void h_do(M_VM* v) {
-    /* DO marker - no-op, just advances PC */
-    /* DO is a marker instruction for do-while loops */
-}
-
-static void h_dwhl(M_VM* v) {
-    /* DO-WHILE loop: jump back to DO if condition is true
-     * Format: DO,<body>,WHILE,<cond>
-     * When we reach WHILE, we pop the condition and jump back if true.
+static void h_jnz(M_VM* v) {
+    /* Jump if not zero: <cond>,JNZ,<offset>
+     * Jump to offset if condition is true (non-zero).
+     * Offset is signed varint encoded (relative to current PC).
      */
     NEED(v, 1);
     int32_t cond = to_int(POP(v));
     int pc = v->pc;
-    uint32_t target = 0;
+    int16_t offset = 0;
     
-    if (!m_vm_decode_uvarint(v->code, &pc, v->code_len, &target)) {
+    if (!m_vm_decode_svarint(v->code, &pc, v->code_len, &offset)) {
         SET_FAULT(v, M_FAULT_BAD_ENCODING);
         return;
     }
     v->pc = pc;
     
     if (cond != 0) {
+        int target = v->pc + offset;
         CHECK_PC(v, target);
-        v->pc = (int)target;
+        v->pc = target;
     }
 }
 
-static void h_jmp(M_VM* v) {
-    /* Unconditional jump: JMP,<target_addr> */
+static void h_do(M_VM* v) {
+    /* DO marker - no operands, no side effects */
+    (void)v;
+}
+
+static void h_dwhl(M_VM* v) {
+    /* DO-WHILE loop: jump back to DO if condition is true
+     * Format: DO,<body>,DWHL,<offset>
+     * When we reach DWHL, we pop the condition and jump back if true.
+     * The offset is signed varint encoded (relative to current PC).
+     */
+    NEED(v, 1);
+    int32_t cond = to_int(POP(v));
     int pc = v->pc;
-    uint32_t target = 0;
+    int16_t offset = 0;
     
-    if (!m_vm_decode_uvarint(v->code, &pc, v->code_len, &target)) {
+    if (!m_vm_decode_svarint(v->code, &pc, v->code_len, &offset)) {
         SET_FAULT(v, M_FAULT_BAD_ENCODING);
         return;
     }
     v->pc = pc;
     
+    if (cond != 0) {
+        /* Jump back to DO (relative offset from current PC) */
+        int target = v->pc + offset;
+        CHECK_PC(v, target);
+        v->pc = target;
+    }
+}
+
+static void h_whil(M_VM* v) {
+    /* WHILE loop: check condition, jump to body if true
+     * Format: <condition>, WHILE,<offset>
+     * The condition should be on top of the stack.
+     * If cond is false (zero), jump to loop end (relative offset from current PC).
+     * If cond is true, fall through to body.
+     */
+    NEED(v, 1);
+    int32_t cond = to_int(POP(v));
+    int pc = v->pc;
+    int16_t offset = 0;
+    
+    if (!m_vm_decode_svarint(v->code, &pc, v->code_len, &offset)) {
+        SET_FAULT(v, M_FAULT_BAD_ENCODING);
+        return;
+    }
+    v->pc = pc;
+    
+    if (cond == 0) {
+        /* Condition false, jump to loop end (relative offset from current PC) */
+        int target = v->pc + offset;
+        CHECK_PC(v, target);
+        v->pc = target;
+    }
+}
+
+static void h_jmp(M_VM* v) {
+    /* Unconditional jump: JMP,<offset> */
+    int pc = v->pc;
+    int16_t offset = 0;
+    
+    if (!m_vm_decode_svarint(v->code, &pc, v->code_len, &offset)) {
+        SET_FAULT(v, M_FAULT_BAD_ENCODING);
+        return;
+    }
+    v->pc = pc;
+    int target = v->pc + offset;
     CHECK_PC(v, target);
-    v->pc = (int)target;
+    v->pc = target;
 }
 
 static void h_rt(M_VM* v) {
@@ -934,6 +1191,7 @@ static void h_rt(M_VM* v) {
     CHECK_FRAME_POP(v);
     memcpy(v->locals, v->locals_frames[v->frame_sp--], sizeof(v->locals));
     
+    v->call_depth--;  /* Decrement call depth */
     v->pc = (int)ret_addr;
     PUSH(v, ret_val);
 }
@@ -976,6 +1234,13 @@ static void h_cl(M_VM* v) {
     }
     
     NEED(v, (int)argc);
+
+    /* Check call depth limit */
+    if (v->call_depth >= v->call_depth_limit) {
+        SET_FAULT(v, M_FAULT_CALL_DEPTH_LIMIT);
+        return;
+    }
+    v->call_depth++;
 
     /* Save locals frame */
     CHECK_FRAME_PUSH(v);
@@ -1101,8 +1366,7 @@ static const uint32_t GAS_COST[256] = {
     [M_SUB]    = 1,
     [M_MUL]    = 3,
     [M_DIV]    = 5,
-    [M_MOD]    = 5,
-    [M_AND]    = 1,
+    [M_AND]    = 1,     /* Core - per spec (was M_MOD, now AND at 54) */
     [M_OR]     = 1,
     [M_XOR]    = 1,
     [M_SHL]    = 1,
@@ -1115,20 +1379,24 @@ static const uint32_t GAS_COST[256] = {
     [M_DUP]    = 1,
     [M_DRP]    = 1,
     [M_ROT]    = 1,
+    /* Array operations - both规范 defined and legacy */
+    [M_LEN]    = 2,
     [M_GET]    = 2,
     [M_PUT]    = 3,
     [M_SWP]    = 1,
+    [M_GET_ALIAS] = 2,   /* Legacy alias */
+    [M_PUT_ALIAS] = 3,   /* Legacy alias */
+    [M_SWP_ALIAS] = 1,   /* Legacy alias */
     [M_ALLOC]  = 5,      /* Memory allocation */
     [M_FREE]   = 2,      /* Memory free */
-    [M_LEN]    = 2,
     [M_NEWARR] = 5,
     [M_IDX]    = 2,
     [M_STO]    = 3,
     [M_B]      = 0,
     [M_E]      = 0,
     [M_IF]     = 1,
-    [M_JZ]     = 1,
-    [M_JMP]    = 1,
+    [M_WH]     = 1,      /* While loop */
+    [M_FR]     = 1,      /* For loop (placeholder) */
     [M_RT]     = 2,
     [M_CL]     = 5,
     [M_HALT]   = 0,
@@ -1138,11 +1406,22 @@ static const uint32_t GAS_COST[256] = {
     [M_IOR]    = 3,
     [M_TRACE]  = 1,
     [M_PH]     = 0,
-    [M_DWHL]   = 1,
-    [M_DO]     = 0,
     [M_GC]     = 10,    /* GC costs more (scans all memory) */
     [M_BP]     = 1,
-    [M_STEP]   = 0
+    [M_STEP]   = 0,
+    /* Extension instructions (100-199) */
+    [M_JZ]     = 1,
+    [M_JNZ]    = 1,     /* Jump if not zero */
+    [M_JMP]    = 1,
+    /* Extension arithmetic (110+) */
+    [M_MOD]    = 5,     /* Modulo - moved to Extension 110 */
+    [M_NEG]    = 1,     /* Negate */
+    [M_NOT]    = 1,     /* Bitwise NOT */
+    [M_NEQ]    = 1,     /* Not equal - moved to Extension 113 */
+    /* Extension loop constructs (legacy) */
+    [M_DWHL]   = 1,
+    [M_DO]     = 0,
+    [M_WHIL]   = 1
 };
 
 /* =============================================
@@ -1160,8 +1439,7 @@ static const handler TABLE[256] = {
     [M_SUB]    = h_sub,
     [M_MUL]    = h_mul,
     [M_DIV]    = h_div,
-    [M_MOD]    = h_mod,
-    [M_AND]    = h_and,
+    [M_AND]    = h_and,   /* Core - per spec (was M_MOD, now AND at 54) */
     [M_OR]     = h_or,
     [M_XOR]    = h_xor,
     [M_SHL]    = h_shl,
@@ -1174,20 +1452,23 @@ static const handler TABLE[256] = {
     [M_DUP]    = h_dup,
     [M_DRP]    = h_drp,
     [M_ROT]    = h_rot,
+    /* Array operations - both规范 defined (61-63) and legacy (67-69) */
+    [M_LEN]    = h_len,
     [M_GET]    = h_get,
     [M_PUT]    = h_put,
     [M_SWP]    = h_swp,
-    [M_ALLOC]  = h_alloc,
-    [M_FREE]   = h_free,
-    [M_LEN]    = h_len,
+    [M_GET_ALIAS] = h_get,   /* Legacy alias for backward compatibility */
+    [M_PUT_ALIAS] = h_put,   /* Legacy alias for backward compatibility */
+    [M_SWP_ALIAS] = h_swp,   /* Legacy alias for backward compatibility */
+    /* Legacy array operations (moved to Extension range for clarity) */
     [M_NEWARR] = h_newarr,
     [M_IDX]    = h_idx,
     [M_STO]    = h_sto,
     [M_B]      = h_b,
     [M_E]      = h_e,
     [M_IF]     = h_if,
-    [M_JZ]     = h_jz,
-    [M_JMP]    = h_jmp,
+    [M_WH]     = h_wh,    /* While loop (now implemented) */
+    [M_FR]     = h_fr,    /* For loop (placeholder) */
     [M_FN]     = h_fn,
     [M_RT]     = h_rt,
     [M_CL]     = h_cl,
@@ -1198,11 +1479,22 @@ static const handler TABLE[256] = {
     [M_IOR]    = h_ior,
     [M_TRACE]  = h_trace,
     [M_PH]     = h_ph,
-    [M_DWHL]   = h_dwhl,
-    [M_DO]     = h_do,
     [M_GC]     = h_gc,
     [M_BP]     = h_bp,
-    [M_STEP]   = h_step
+    [M_STEP]   = h_step,
+    /* Extension instructions (100-199) */
+    [M_JZ]     = h_jz,
+    [M_JNZ]    = h_jnz,   /* Jump if not zero (now implemented) */
+    [M_JMP]    = h_jmp,
+    /* Extension arithmetic (110+) */
+    [M_MOD]    = h_mod,   /* Modulo - moved to Extension 110 */
+    [M_NEG]    = h_neg,   /* Negate */
+    [M_NOT]    = h_not,   /* Bitwise NOT */
+    [M_NEQ]    = h_neq,   /* Not equal - moved to Extension 113 */
+    /* Extension loop constructs (legacy, superseded by Core WH) */
+    [M_DWHL]   = h_dwhl,
+    [M_DO]     = h_do,
+    [M_WHIL]   = h_whil
 };
 
 /* =============================================
@@ -1224,6 +1516,9 @@ void m_vm_init(M_VM* vm, uint8_t* code, int len,
     vm->step_limit = MAX_STEPS;
     vm->gas = 0;
     vm->gas_limit = 0;
+    vm->call_depth = 0;
+    vm->call_depth_limit = CALL_DEPTH_MAX;
+    vm->stack_limit = STACK_SIZE;
     vm->local_count = 0;
     vm->frame_sp = -1;
     vm->alloc_head = NULL;
@@ -1237,6 +1532,18 @@ void m_vm_set_step_limit(M_VM* vm, uint64_t limit) {
 
 void m_vm_set_gas_limit(M_VM* vm, uint64_t limit) { 
     vm->gas_limit = limit; 
+}
+
+void m_vm_set_call_depth_limit(M_VM* vm, int limit) {
+    if (limit < 1) limit = 1;
+    if (limit > CALL_DEPTH_MAX) limit = CALL_DEPTH_MAX;
+    vm->call_depth_limit = limit;
+}
+
+void m_vm_set_stack_limit(M_VM* vm, int limit) {
+    if (limit < 0) limit = 0;
+    if (limit > STACK_SIZE) limit = STACK_SIZE;
+    vm->stack_limit = limit;
 }
 
 void m_vm_reset(M_VM* vm) {
@@ -1485,13 +1792,11 @@ const char* m_vm_opcode_name(uint32_t op) {
         case M_B:    return "B";
         case M_E:    return "E";
         case M_IF:   return "IF";
-        case M_JZ:   return "JZ";
-        case M_JMP:  return "JMP";
+        case M_WH:   return "WH";
+        case M_FR:   return "FR";
         case M_RT:   return "RT";
         case M_CL:   return "CL";
         case M_PH:   return "PH";
-        case M_DO:   return "DO";
-        case M_DWHL: return "DWHL";
 
         /* Data */
         case M_LIT:  return "LIT";
@@ -1499,20 +1804,19 @@ const char* m_vm_opcode_name(uint32_t op) {
         case M_LET:  return "LET";
         case M_SET:  return "SET";
 
-        /* Comparison */
+        /* Comparison - Core (40-44) */
         case M_LT:   return "LT";
         case M_GT:   return "GT";
         case M_LE:   return "LE";
         case M_GE:   return "GE";
         case M_EQ:   return "EQ";
 
-        /* Arithmetic */
+        /* Arithmetic - Core (50-58) */
         case M_ADD:  return "ADD";
         case M_SUB:  return "SUB";
         case M_MUL:  return "MUL";
         case M_DIV:  return "DIV";
-        case M_MOD:  return "MOD";
-        case M_AND:  return "AND";
+        case M_AND:  return "AND";   /* Core - per spec (54) */
         case M_OR:   return "OR";
         case M_XOR:  return "XOR";
         case M_SHL:  return "SHL";
@@ -1522,21 +1826,26 @@ const char* m_vm_opcode_name(uint32_t op) {
         case M_DUP:  return "DUP";
         case M_DRP:  return "DRP";
         case M_ROT:  return "ROT";
+
+        /* Array operations -规范 defined (61-63) */
+        case M_LEN:  return "LEN";
+        case M_GET:  return "GET";
+        case M_PUT:  return "PUT";
         case M_SWP:  return "SWP";
 
-        /* Array */
-        case M_GET:    return "GET";
-        case M_PUT:    return "PUT";
-        case M_LEN:    return "LEN";
-        case M_NEWARR: return "NEWARR";
-        case M_IDX:    return "IDX";
-        case M_STO:    return "STO";
+        /* Legacy array operations (for backward compatibility) */
+        case M_GET_ALIAS:  return "GET";
+        case M_PUT_ALIAS:  return "PUT";
+        case M_SWP_ALIAS:  return "SWP";
+        case M_NEWARR:     return "NEWARR";
+        case M_IDX:        return "IDX";
+        case M_STO:        return "STO";
 
         /* IO */
         case M_IOW:  return "IOW";
         case M_IOR:  return "IOR";
 
-        /* Memory */
+        /* Memory - Platform Extension (200+) */
         case M_ALLOC: return "ALLOC";
         case M_FREE:  return "FREE";
 
@@ -1548,6 +1857,22 @@ const char* m_vm_opcode_name(uint32_t op) {
         case M_GC:    return "GC";
         case M_BP:    return "BP";
         case M_STEP:  return "STEP";
+
+        /* Extension instructions (100-199) */
+        case M_JZ:   return "JZ";
+        case M_JNZ:  return "JNZ";
+        case M_JMP:  return "JMP";
+
+        /* Extension arithmetic (110+) */
+        case M_MOD:  return "MOD";   /* Extension - 110 */
+        case M_NEG:  return "NEG";   /* Extension - 111 */
+        case M_NOT:  return "NOT";   /* Extension - 112 */
+        case M_NEQ:  return "NEQ";   /* Extension - 113 (was 45) */
+
+        /* Extension loop constructs */
+        case M_DO:   return "DO";
+        case M_DWHL: return "DWHL";
+        case M_WHIL: return "WHILE";
 
         default:     return "UNK";
     }

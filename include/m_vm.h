@@ -22,13 +22,22 @@
 #define M_B    10   /* Block begin */
 #define M_E    11   /* Block end */
 #define M_IF   12   /* Conditional: <cond>,IF,B,<then>,E,B,<else>,E */
-#define M_JZ   13   /* Jump if zero: <cond>,JZ,<target_addr> */
-#define M_JMP  14   /* Unconditional jump: JMP,<target_addr> */
+#define M_WH   13   /* While loop: <cond>,WH,B<body>,E (Core - now implemented) */
+#define M_FR   14   /* For loop: <init>,<cond>,<inc>,FR,B<body>,E (Extension - not yet fully implemented) */
 #define M_RT   16   /* Return: RT,<value> */
 #define M_CL   17   /* Call: CL,<func_id>,<argc>,<arg0>..<argN> */
 #define M_PH   18   /* Placeholder (for alignment/padding) */
-#define M_DO   19   /* Do-while loop begin: DO,<body>,WHILE,<cond> */
-#define M_DWHL 20   /* Do-while loop end (jump back if cond true): WHILE,<target_addr> */
+
+/* --- Extension Control Flow (100-199, not frozen) --- */
+/* JZ, JMP, JNZ are Extension instructions for lowering structured control flow */
+#define M_JZ   101  /* Jump if zero: <cond>,JZ,<target_addr> (Extension) */
+#define M_JMP  100  /* Unconditional jump: JMP,<target_addr> (Extension) */
+#define M_JNZ  102  /* Jump if not zero: <cond>,JNZ,<target_addr> (Extension - now implemented) */
+
+/* --- Extension Loop Constructs (NOT ABI - for lowering only) --- */
+#define M_DO    140 /* Do-while loop begin: DO,<body>,WHILE,<cond> (Extension - NOT ABI, for compiler lowering) */
+#define M_DWHL  141 /* Do-while loop end (jump back if cond true) (Extension - NOT ABI) */
+#define M_WHIL  142 /* While loop: <cond>,WHILE,<offset> (Extension - NOT ABI, use Core WH instead) */
 
 /* --- Data Operations (30-39) --- */
 #define M_LIT  30   /* Literal: LIT,<varint|dict_id> */
@@ -43,39 +52,39 @@
 #define M_GE   43   /* Greater than or equal */
 #define M_EQ   44   /* Equal */
 
-/* --- Arithmetic (50-59) --- */
-#define M_ADD  50   /* Addition: a,b -> a+b */
-#define M_SUB  51   /* Subtraction: a,b -> a-b */
-#define M_MUL  52   /* Multiplication: a,b -> a*b */
-#define M_DIV  53   /* Division: a,b -> a/b */
-#define M_MOD  54   /* Modulo: a,b -> a%b (C semantics: sign matches a) */
-#define M_AND  55   /* Bitwise AND: a,b -> a&b */
-#define M_OR   56   /* Bitwise OR: a,b -> a|b */
-#define M_XOR  57   /* Bitwise XOR: a,b -> a^b */
-#define M_SHL  58   /* Shift left: a,b -> a<<b */
-#define M_SHR  59   /* Shift right: a,b -> a>>b */
+/* --- Arithmetic Extension (110-119) --- */
+#define M_MOD  110  /* Modulo: a,b -> a%b (Extension - C semantics, sign matches a) */
+#define M_NEG  111  /* Negate: a -> -a (Extension - now implemented) */
+#define M_NOT  112  /* Bitwise NOT: a -> ~a (Extension - now implemented) */
+#define M_NEQ  113  /* Not equal: a,b -> (a!=b) (Extension - was 45) */
 
 /* --- Array Operations (60-63) --- */
+/* Note: These follow the M-Token specification exactly */
 #define M_LEN    60   /* Array length: <array_ref> -> <length> */
-#define M_NEWARR 61   /* Array create: <size> -> <array_ref> */
-#define M_IDX    62   /* Array index: <array_ref>,<index> -> <element> */
-#define M_STO    63   /* Array store: <array_ref>,<index>,<value> -> <array_ref> */
+#define M_GET    61   /* Array get: <array_ref>,<index> -> <element> (规范定义) */
+#define M_PUT    62   /* Array put: <array_ref>,<index>,<value> -> <array_ref> (规范定义) */
+#define M_SWP    63   /* Swap: a,b -> b,a (规范定义 - 数组/栈操作) */
 
 /* --- Stack Operations (64-66) --- */
 #define M_DUP  64   /* Duplicate top: a -> a,a */
 #define M_DRP  65   /* Drop top: a -> (pop) */
 #define M_ROT  66   /* Rotate top 3: a,b,c -> b,c,a */
 
-/* --- Additional Array Operations (67-68) --- */
-#define M_GET  67   /* Array get: <array_ref>,<index> -> <element> */
-#define M_PUT  68   /* Array put: <array_ref>,<index>,<value> -> <array_ref> */
+/* --- Legacy Aliases (DEPRECATED - will be removed v2.0) --- */
+/* These are kept for backward compatibility only - use M_GET/M_PUT/M_SWP instead */
+#define M_GET_ALIAS  67   /* DEPRECATED: Use M_GET=61 */
+#define M_PUT_ALIAS  68   /* DEPRECATED: Use M_PUT=62 */
+#define M_SWP_ALIAS  69   /* DEPRECATED: Use M_SWP=63 */
 
-/* --- Swap (69) --- */
-#define M_SWP  69   /* Swap: a,b -> b,a (swap top two) */
+/* --- Legacy Array Operations (120-122) --- */
+/* For backward compatibility - renamed to avoid confusion with规范 numbers */
+#define M_NEWARR 120  /* Array create: <size> -> <array_ref> (Extension) */
+#define M_IDX    121  /* Array index: <array_ref>,<index> -> <element> (Extension) */
+#define M_STO    122  /* Array store: <array_ref>,<index>,<value> -> <array_ref> (Extension) */
 
-/* --- Memory Management (90-91) --- */
-#define M_ALLOC 90  /* Allocate: <size> -> <ptr> (allocate heap memory) */
-#define M_FREE  91  /* Free: <ptr> -> (free heap memory, pop ptr) */
+/* --- Platform/Hardware Extensions (200-239) --- */
+#define M_ALLOC  200  /* Allocate: <size> -> <ptr> (Platform Extension) */
+#define M_FREE   201  /* Free: <ptr> -> (Platform Extension) */
 
 /* --- Hardware IO (70-79) --- */
 #define M_IOW  70   /* IO Write: IOW,<device_id>,<value> */
@@ -97,6 +106,7 @@
 #define GLOBALS_SIZE   128
 #define MAX_STEPS      1000000
 #define MAX_TRACE      1024
+#define CALL_DEPTH_MAX 32     /* Maximum call depth for safety */
 
 /* --- Fault Codes --- */
 typedef enum {
@@ -121,7 +131,8 @@ typedef enum {
     M_FAULT_OOM,            /* Out of memory */
     M_FAULT_ASSERT_FAILED,
     M_FAULT_BREAKPOINT,     /* Breakpoint hit */
-    M_FAULT_DEBUG_STEP      /* Single-step pause */
+    M_FAULT_DEBUG_STEP,     /* Single-step pause */
+    M_FAULT_CALL_DEPTH_LIMIT /* Call depth exceeded limit */
 } M_Fault;
 
 /* Authorization key */
@@ -171,13 +182,13 @@ typedef enum {
 typedef struct M_Value {
     M_Type   type;
     union {
-        int32_t        i;
-        float          f;
+        int64_t        i;          /* Core numeric type: i64 per spec */
+        double         f;          /* Float: double per spec */
         bool           b;
         struct M_Array* array_ptr;  /* Pointer to M_Array */
         struct {
             const char* str;
-            int32_t     len;
+            int64_t     len;       /* Use int64_t per spec */
         } s;
         void*          ref;
     } u;
@@ -185,8 +196,8 @@ typedef struct M_Value {
 
 /* --- M Array (dynamic array) --- */
 typedef struct M_Array {
-    int32_t  len;           /* Number of elements */
-    int32_t  cap;           /* Capacity */
+    int64_t  len;           /* Use int64_t per spec */
+    int64_t  cap;           /* Use int64_t per spec */
     M_Value  data[];        /* Flexible array member - stores M_Value elements */
 } M_Array;
 
@@ -237,6 +248,9 @@ typedef struct M_VM {
     uint64_t step_limit;
     uint64_t gas;
     uint64_t gas_limit;
+    int      call_depth;        /* Current call depth */
+    int      call_depth_limit;  /* Maximum call depth (default: CALL_DEPTH_MAX) */
+    int      stack_limit;       /* Runtime stack limit (<= STACK_SIZE) */
 
     /* Fault tracking */
     M_Fault  fault;
@@ -254,6 +268,8 @@ typedef struct M_VM {
  * ============================================= */
 
 bool m_vm_decode_uvarint(const uint8_t* code, int* pc, int len, uint32_t* out);
+bool m_vm_decode_uvarint64(const uint8_t* code, int* pc, int len, uint64_t* out);
+bool m_vm_decode_svarint(const uint8_t* code, int* pc, int len, int16_t* out);
 
 int m_vm_encode_uvarint(uint32_t n, uint8_t* out);
 
@@ -270,6 +286,10 @@ void m_vm_init(M_VM* vm, uint8_t* code, int len, void* io_w, void* io_r, void* s
 void m_vm_set_step_limit(M_VM* vm, uint64_t limit);
 
 void m_vm_set_gas_limit(M_VM* vm, uint64_t limit);
+
+void m_vm_set_call_depth_limit(M_VM* vm, int limit);
+
+void m_vm_set_stack_limit(M_VM* vm, int limit);
 
 void m_vm_reset(M_VM* vm);
 

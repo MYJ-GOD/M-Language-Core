@@ -1,75 +1,127 @@
-# ========================
-# 编译产物 (Build artifacts)
-# ========================
-*.o
-*.obj
-*.a
-*.lib
+# ============================================================
+# Visual Studio 核心忽略项 (必选)
+# ============================================================
+.vs/                    # 存储编辑器状态、断点等个人配置
+[Bb]in/                 # 输出二进制目录
+[Oo]bj/                 # 中间对象目录
+[Dd]ebug/               # 调试模式构建产物
+[Rr]elease/             # 发行模式构建产物
+x64/                    # 64位构建产物
+x86/                    # 32位构建产物
+ARM/                    # ARM架构构建产物
+ARM64/                  # ARM64架构构建产物
+
+# 个人项目配置文件 (千万不要提交)
+*.user
+*.userosscache
+*.sln.docstates
+*.suo
+
+# ============================================================
+# 编译产物与二进制文件 (Build Artifacts)
+# ============================================================
+*.exe
 *.dll
+*.lib
+*.exp
+*.obj
+*.o
+*.a
 *.so
 *.dylib
-*.exe
 *.out
 *.app
 *.i
 *.s
+*.res                   # 资源编译产物
 
-# ========================
-# 调试与中间文件 (Debug & Intermediate)
-# ========================
-*.pdb
-*.ilk
+# ============================================================
+# 调试、性能分析与日志 (Debug, Profiling & Logs)
+# ============================================================
+*.pdb                   # 调试符号 (非常大)
+*.ilk                   # 增量链接文件
 *.idb
-*.exp
-*.res
-*.pch
-*.tlog
+*.pch                   # 预编译头
+*.tlog                  # 构建日志
 *.lastbuildstate
 *.recipe
 *.iobj
 *.ipdb
-*.dSYM/
-
-# ========================
-# Visual Studio 核心忽略项
-# ========================
-.vs/
-x64/
-x86/
-Debug/
-Release/
-ARM/
-ARM64/
-*.user
-*.suo
 *.log
-*.userosscache
-*.sln.docstates
+*.tlog
+*.dSYM/                 # macOS 调试符号
+*.pgc                   # 性能快照
+*.pgd
+
+# ============================================================
+# 数据库与 IntelliSense (Database & IntelliSense)
+# ============================================================
+*.ncb
+*.sdf
+*.opensdf
 *.opendb
 *.db
 *.ipch
+*.VC.db
+*.VC.opendb
 
-# ========================
-# 其他编辑器/IDE 配置
-# ========================
+# ============================================================
+# 其他编辑器/IDE 配置文件
+# ============================================================
 # VS Code
 .vscode/
+!.vscode/settings.json  # 如果团队需要统一缩进等配置，可以保留此项
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# CLion / CMake
+cmake-build-*/
+CMakeSettings.json
+CMakeUserPresets.json
+
 # IntelliJ IDEA
 .idea/
-# CLion
-cmake-build-*/
+*.iml
 
-# ========================
-# 系统文件 (OS files)
-# ========================
+# ============================================================
+# 系统文件 (OS Files)
+# ============================================================
 .DS_Store
+.DS_Store?
+._*
 Thumbs.db
 desktop.ini
 
-# ========================
-# 构建目录 (General Build dirs)
-# ========================
-build/
-bin/
-out/
-obj/
+# ============================================================
+# 外部依赖与临时文件
+# ============================================================
+node_modules/           # 如果涉及前端组件
+vcpkg_installed/        # vcpkg 本地包目录
+*.tmp
+*.bak
+*.swp                   # Vim 临时文件
+
+# ============================================================
+# Visual Studio extra generated files (from actual repo noise)
+# ============================================================
+
+# VS internal caches (force ignore even if nested)
+.vs/**
+**/.vs/**
+
+# Browse / Semantic / Copilot databases
+Browse.VC.db*
+CodeChunks.db*
+SemanticSymbols.db*
+
+# MSVC debug & linker artifacts (extra safety)
+*.ilk
+*.pdb
+vc*.pdb
+
+# Visual Studio layout & state files
+DocumentLayout*.json
+*.vcxproj.FileListAbsolute.txt
+
+# Visual Studio extension index files
+*.vsidx

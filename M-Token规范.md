@@ -1,362 +1,266 @@
-# M-Token 规范文档
-
-## 1. 概述
-
-M-Token 是一种专为 AI 设计的压缩字节码语言，用于 AI 与硬件之间的高效通信。
-
-### 设计原则
-
-- **全 Varint 编码**：所有 token 使用变长整数编码
-- **极致压缩**：每个 token 占用最小字节数
-- **AI 友好**：指令集简洁统一，便于 AI 生成和理解
-- **栈机架构**：基于栈的执行模型，兼容 SSA 优化
-
----
-
-## 2. 数据编码
-
-### 2.1 Varint (无符号变长整数)
-
-使用 LEB128 变长编码：
-
-```
-值范围        编码
-────────────  ─────────────────────────────
-0 - 127       1 字节:  [0xxxxxxx] (bit 7 = 0)
-128 - 16511   2 字节:  [1xxxxxxx][0xxxxxxx]
-16512 - ...   更多字节...
-```
-
-示例：
-```
-0      → [0x00]
-127    → [0x7F]
-128    → [0x80, 0x01]
-255    → [0xFF, 0x01]
-1000   → [0xE8, 0x07]
-```
-
-### 2.2 Zigzag (有符号整数)
-
-将负数映射为无符号整数：
-
-```c
-// 编码
-uint32_t encode_zigzag(int32_t n) {
-    return (n << 1) ^ (n >> 31);
-}
-
-// 解码
-int32_t decode_zigzag(uint32_t n) {
-    return (n >> 1) ^ -(int32_t)(n & 1);
-}
-```
-
-示例：
-```
-0      → [0x00]
--1     → [0x01]
-1      → [0x02]
--2     → [0x03]
-127    → [0xFE]
--127   → [0xFD]
-```
-
----
-
-## 3. 操作码表
-
-### 3.1 控制流 (10-18)
-
-| Opcode | 名称 | 格式 | 说明 |
-|--------|------|------|------|
-| 10 | B | - | 块开始 (block begin) |
-| 11 | E | - | 块结束 (block end) |
-| 12 | IF | `<cond>,IF,B<then>E,B<else>E` | 条件语句 |
-| 13 | WH | `<cond>,WH,B<body>E` | While 循环 |
-| 14 | FR | `<init>,<cond>,<inc>,FR,B<body>E` | For 循环 |
-| 15 | FN | `<arity>,B<body>,E` | 函数定义 |
-| 16 | RT | `<value>` | 函数返回 |
-| 17 | CL | `<func_id>,<argc>,<arg0>..<argN>` | 函数调用 |
-| 18 | PH | - | 占位符 |
-
-### 3.2 数据操作 (30-33)
-
-| Opcode | 名称 | 格式 | 说明 |
-|--------|------|------|------|
-| 30 | LIT | `<value>` | 压入字面量 |
-| 31 | V | `<index>` | 读取局部变量 (DeBruijn 索引) |
-| 32 | LET | `<index>,<value>` | 写入局部变量 |
-| 33 | SET | `<name_id>,<value>` | 写入全局变量 |
-
-### 3.3 比较运算 (40-44)
-
-| Opcode | 名称 | 栈操作 | 说明 |
-|--------|------|--------|------|
-| 40 | LT | a,b → (a<b) | 小于 |
-| 41 | GT | a,b → (a>b) | 大于 |
-| 42 | LE | a,b → (a<=b) | 小于等于 |
-| 43 | GE | a,b → (a>=b) | 大于等于 |
-| 44 | EQ | a,b → (a==b) | 等于 |
+M-Token 规范
+1. 总体
+
+M-Token 是一种 结构化、可执行、可验证 的指令序列格式。
+
+面向 AI 生成 / 人类审计 / 虚拟机执行。
+
+执行模型：栈机。
+
+所有指令与参数均使用 Varint 编码。
+
+有符号数使用 ZigZag + Varint。
+
+2. 指令空间划分
+区间	用途
+0–99	Core（冻结，对外 ABI）
+100–199	Extension / IR（实现内部，可选）
+200–239	平台 / 硬件扩展
+240–255	实验 / 保留
 
-### 3.4 算术运算 (50-58)
+对外发布的 M-Token 只允许使用 Core 指令。
 
-| Opcode | 名称 | 栈操作 | 说明 |
-|--------|------|--------|------|
-| 50 | ADD | a,b → (a+b) | 加法 |
-| 51 | SUB | a,b → (a-b) | 减法 |
-| 52 | MUL | a,b → (a*b) | 乘法 |
-| 53 | DIV | a,b → (a/b) | 除法 |
-| 54 | AND | a,b → (a&b) | 按位与 |
-| 55 | OR | a,b → (a\|b) | 按位或 |
-| 56 | XOR | a,b → (a^b) | 按位异或 |
-| 57 | SHL | a,b → (a<<b) | 左移 |
-| 58 | SHR | a,b → (a>>b) | 右移 |
+3. Core 指令集（0–99，冻结）
+3.1 控制流（10–18）
+Opcode	名称	语法
+10	B	block begin
+11	E	block end
+12	IF	<cond>,IF,B<then>,E,B<else>,E
+13	WH	<cond>,WH,B<body>,E
+14	FR	<init>,<cond>,<inc>,FR,B<body>,E
+15	FN	FN,<arity>,B<body>,E
+16	RT	RT,<value>
+17	CL	CL,<func_id>,<argc>,<arg...>
+18	PH	placeholder
+3.2 数据与变量（30–33）
+Opcode	名称	行为
+30	LIT	push literal
+31	V	read local (DeBruijn index)
+32	LET	write local
+33	SET	write global
+3.3 比较（40–44）
 
-### 3.5 数组操作 (60-63)
+LT / GT / LE / GE / EQ
 
-| Opcode | 名称 | 栈操作 | 说明 |
-|--------|------|--------|------|
-| 60 | LEN | arr → len | 数组长度 |
-| 61 | GET | arr,idx → val | 数组读取 |
-| 62 | PUT | arr,idx,val → arr | 数组写入 |
-| 63 | SWP | a,b → b,a | 交换栈顶两元素 |
+3.4 算术 / 位运算（50–58）
+Opcode	名称
+50	ADD
+51	SUB
+52	MUL
+53	DIV
+54	AND
+55	OR
+56	XOR
+57	SHL
+58	SHR
+3.5 数组（60–63）
+Opcode	名称	栈行为
+60	LEN	arr → len
+61	GET	arr,idx → val
+62	PUT	arr,idx,val → arr
+63	SWP	a,b → b,a
+3.6 栈操作（64–66）
 
-### 3.6 栈操作 (64-66)
+DUP / DRP / ROT
 
-| Opcode | 名称 | 栈操作 | 说明 |
-|--------|------|--------|------|
-| 64 | DUP | a → a,a | 复制栈顶 |
-| 65 | DRP | a → (pop) | 丢弃栈顶 |
-| 66 | ROT | a,b,c → b,c,a | 旋转栈顶3元素 |
+3.7 硬件 IO（70–71）
+Opcode	名称
+70	IOW
+71	IOR
+3.8 系统（80–83）
+Opcode	名称
+80	GTWAY
+81	WAIT
+82	HALT
+83	TRACE
+4. Extension / IR 指令（100–199）
+4.1 跳转（低级控制流）
+Opcode	名称	参数
+100	JMP	svarint offset
+101	JZ	svarint offset
+102	JNZ	svarint offset
+4.2 算术扩展
 
-### 3.7 硬件 IO (70-71)
+MOD / NEG / NOT
 
-| Opcode | 名称 | 格式 | 说明 |
-|--------|------|------|------|
-| 70 | IOW | `<device_id>,<value>` | 硬件写入 |
-| 71 | IOR | `<device_id>` → value | 硬件读取 |
-
-### 3.8 系统操作 (80-83)
-
-| Opcode | 名称 | 格式 | 说明 |
-|--------|------|------|------|
-| 80 | GTWAY | `<key>` | 安全授权 |
-| 81 | WAIT | `<milliseconds>` | 延时等待 |
-| 82 | HALT | - | 停止执行 |
-| 83 | TRACE | `<level>` | 调试追踪 |
-
----
-
-## 4. 语法格式
-
-### 4.1 函数定义
-
-```
-FN,<arity>,B<body>,E
-
-示例:
-  FN,2,B,V0,V1,ADD,RT,E
-  ; 定义函数: add(a, b) = a + b
-  ; 参数数量 arity = 2
-```
-
-### 4.2 函数调用
-
-```
-CL,<func_id>,<argc>,<arg0>,<arg1>,...
-
-示例:
-  CL,5,2,10,20
-  ; 调用 func_5，参数个数=2，参数为 10 和 20
-```
-
-### 4.3 条件语句
-
-```
-<cond>,IF,B<then>,E,B<else>,E
-
-示例:
-  LIT,10,LIT,5,GT,IF,B,LIT,1,E,B,LIT,0,E
-  ; if (10 > 5) { 1 } else { 0 }
-```
-
-### 4.4 While 循环
-
-```
-<cond>,WH,B<body>,E
-
-示例:
-  LIT,0,LET,0,LIT,10,LET,1,V0,LT,WH,B,V0,V1,ADD,LET,1,V0,LIT,1,ADD,LET,0,E
-  ; sum = 0; i = 0; while (i < 10) { sum += i; i++ }
-```
-
-### 4.5 变量作用域 (DeBruijn 索引)
-
-使用 DeBruijn 索引替代变量名：
-
-```
-V,<index>
-LET,<index>,<value>
-```
-
-- 索引 0: 最近作用域的变量
-- 索引 1: 上一级作用域的变量
-- 以此类推
-
----
-
-## 5. 字节码示例
-
-### 5.1 简单计算: 5 + 3 * 2
-
-```
-字节码 (十六进制):
-  [1E] [05] [1E] [03] [1E] [02] [34] [32] [52]
-  
-  1E = LIT
-  05 = 5
-  1E = LIT
-  03 = 3
-  1E = LIT
-  02 = 2
-  34 = MUL
-  32 = ADD
-  52 = HALT
-```
-
-### 5.2 函数调用
-
-```
-定义: fn add(a,b) { a + b }
-字节码:
-  [0F] [02] [0A]  [1E] [00] [1E] [01] [32] [10] [0B]
-  [1E] [05] [1E] [03] [11] [05] [52]
-  
-  0F 02    = FN, arity=2
-  0A       = B (block begin)
-  1E 00    = V 0 (a)
-  1E 01    = V 1 (b)
-  32       = ADD
-  10       = RT
-  0B       = E (block end)
-  
-  1E 05    = LIT 5
-  1E 03    = LIT 3
-  11 05    = CL func_0, 2 args
-  52       = HALT
-```
-
----
-
-## 6. 执行模型
-
-### 6.1 栈机架构
-
-- **数据栈**: 用于计算和传递参数
-- **返回栈**: 用于 CALL/RET
-- **局部变量池**: 存储局部变量 (DeBruijn 索引)
-- **全局变量池**: 存储全局变量
+4.3 数组 / 内存扩展
 
-### 6.2 执行流程
-
-```
-while (pc < code_len && running) {
-    op = decode_varint(code, &pc);
-    handler = TABLE[op];
-    handler(vm);
-    steps++;
-    if (steps > step_limit) fault;
-}
-```
+NEWARR / IDX / STO
 
----
+4.4 调试 / 执行控制
 
-## 7. 安全机制
+GC / BP / STEP
 
-### 7.1 执行限制
+5. 值与类型语义（Value Model）
 
-| 限制 | 说明 | 默认值 |
-|------|------|--------|
-| step_limit | 最大执行步数 | 1,000,000 |
-| gas_limit | 最大 gas 消耗 | 0 (无限制) |
-| stack_size | 数据栈大小 | 256 |
-| locals_size | 局部变量数量 | 64 |
-| globals_size | 全局变量数量 | 128 |
+核心数值类型：i64
 
-### 7.2 Gas 消耗
+布尔语义：0 = false，非 0 = true
 
-| 指令类型 | Gas 消耗 |
-|----------|----------|
-| 栈操作 (DUP, DRP, SWP) | 1 |
-| 算术运算 (ADD, SUB) | 1 |
-| 乘除 (MUL, DIV) | 3-5 |
-| 函数调用 (CL) | 5 |
-| 硬件 IO (IOW, IOR) | 3-5 |
-| 无操作 (B, E, HALT) | 0 |
+所有算术操作使用 二进制补码 wrap-around
 
----
+DIV：除 0 trap
 
-## 8. AI 集成
+SHL / SHR：移位量 b 使用 b & 63
 
-### 8.1 生成 M-Token 的提示词模板
+比较运算结果为 0 / 1
 
-```markdown
-生成 M-Token 字节码来完成以下任务:
+数组为 引用语义
 
-任务描述: [任务说明]
+数组越界访问 trap
 
-要求:
-- 使用 M-Token 语法
-- 所有操作使用 varint 编码
-- 变量使用 DeBruijn 索引
+6. 栈效应与安全
+6.1 栈效应规则
 
-输出格式:
-- 每行一个 token: [opcode],<参数>
-- 最后一行: HALT
+每条指令具有确定的栈输入/输出
 
-示例:
-LIT,5
-LIT,3
-ADD
-HALT
-```
+栈下溢 → trap
 
-### 8.2 执行与反馈
+栈上溢（超过 stack_limit）→ trap
 
-```c
-// AI 生成字节码
-uint8_t bytecode[] = { ... };
+6.2 结构化一致性规则
 
-// VM 执行
-M_VM vm;
-m_vm_init(&vm, bytecode, len, io_write, io_read, NULL, NULL);
-m_vm_set_step_limit(&vm, 10000);
+IF：then 与 else 的净栈效应必须一致
 
-int result = m_vm_run(&vm);
+WH / FR：循环体的净栈效应必须为 0
 
-// 反馈给 AI
-if (result < 0) {
-    // 错误: m_vm_fault_string(vm.fault)
-} else {
-    // 成功: vm.stack[vm.sp] 是结果
-}
-```
+B…E 为语句块，不产生隐式返回值
 
----
+RT：返回值来自栈顶，其余栈内容丢弃
 
-## 9. 参考实现
+7. 函数与作用域（Frame Model）
 
-- `m_vm.h`: VM 头文件定义
-- `m_vm.c`: VM 解释器实现
-- `disasm.c`: 反编译器
-- `mian.c`: 测试用例
+FN,<arity> 创建新的调用帧
 
----
+参数绑定至 local[0..arity-1]
 
-## 10. 修订历史
+其余局部变量初始化为 0
 
-| 版本 | 日期 | 说明 |
-|------|------|------|
-| 1.0 | 2026-02-01 | 初始规范 |
+V / LET 访问越界 → trap
 
+LET 允许写入参数位
+
+RT 结束当前帧并返回值
+
+调用深度超过 call_depth_limit → trap
+
+8. 跳转 IR 语义（Extension）
+
+offset 单位：opcode token 索引
+
+相对基准：当前指令之后的下一条指令
+
+JZ / JNZ：消耗栈顶条件值
+
+跳转目标必须位于 opcode 边界
+
+跳转越界 → trap
+
+9. 授权与 Capability（GTWAY）
+
+GTWAY,<cap_id> 将 capability 加入当前执行会话
+
+IOW / IOR 执行前必须验证 capability
+
+capability 默认按 device_id 授权
+
+未授权 IO → trap
+
+授权仅在当前执行会话内有效
+
+10. Fault / Trap 模型
+10.1 常见 Fault 类型
+
+STACK_UNDERFLOW / STACK_OVERFLOW
+
+BAD_OPCODE / BAD_VARINT
+
+PC_OOB
+
+DIV_BY_ZERO
+
+LOCAL_OOB / GLOBAL_OOB
+
+ARRAY_OOB
+
+STEP_LIMIT / GAS_LIMIT
+
+UNAUTHORIZED_IO
+
+10.2 Trap 行为
+
+立即停止执行
+
+返回 fault code + PC
+
+HALT 为正常终止，fault 为异常终止
+
+11. Static Validation（验证器规范）
+
+验证器 必须拒绝执行 不合法字节码，至少检查：
+
+opcode 合法
+
+varint 编码完整
+
+B/E 完整匹配
+
+IF/WH/FR 结构正确
+
+栈效应在所有路径合法
+
+跳转不越界
+
+locals / globals 访问合法
+
+IO 操作具备授权
+
+12. Gas 与执行限制
+
+VM 必须支持 step_limit
+
+gas_limit 可选
+
+gas 为平台无关固定表
+
+gas 用尽 → trap
+
+13. TRACE 与调试
+
+TRACE,<level> 不得影响程序语义
+
+输出至少包含：PC、opcode
+
+可选输出：栈顶值、locals 概要
+
+TRACE 不得产生 IO 副作用
+
+14. 确定性
+
+Core 指令必须确定性
+
+非确定性行为只能通过 IO 实现
+
+同字节码 + 同输入 → 同结果
+
+15. 约束
+
+Core 指令编号 永不重定义
+
+Extension 指令 不得占用 Core 编号
+
+Core 结构化指令 可 lowering 为 IR
+
+lowering 不得改变可观测语义（IO / TRACE）
+
+16. 合法性
+
+一段 M-Token 程序是合法的，当且仅当：
+
+所有 opcode 属于允许区间
+
+结构化块 B/E 完整匹配
+
+跳转 offset 合法
+
+栈高度在所有路径上合法

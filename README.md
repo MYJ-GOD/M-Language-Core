@@ -1,6 +1,6 @@
-# M-Language Core (v1.6)
+# M-Language Core (v2.0)
 
-面向 AI 的极简字节码与虚拟机实现，目标是用可验证、可审计、可授权的指令流连接 AI 与硬件。
+面向 AI 的结构化字节码与虚拟机实现，遵循 M-Token 规范，提供可验证、可审计、可授权的指令流以连接 AI 与硬件。
 
 ---
 
@@ -8,30 +8,39 @@
 
 M-Language 由三层构成：
 
-1) 意图层：人类或 AI 的高层任务描述
-2) M-Token 层：全 varint 编码的极简指令序列
-3) MVM 层：执行与安全约束（step/gas/授权/越界检查）
+1) **意图层**：人类或 AI 的高层任务描述
+2) **M-Token 层**：全 varint 编码的结构化指令序列
+3) **MVM 层**：执行与安全约束（step/call_depth/stack/授权/越界检查）
 
-当前仓库专注于 **M-Token + MVM** 的核心实现与可执行示例。
+当前仓库专注于 **M-Token + MVM** 的核心实现、验证器与可执行示例。
 
 ---
 
 ## 当前实现进度
 
-已完成：
-- MVM 虚拟机核心（全 varint 解码、栈机执行）
-- 指令集：算术/比较/位运算/栈操作/变量/函数/控制流/数组/IO/内存
-- 安全约束：step limit、gas limit、栈/局部/全局/PC 越界检查
-- 授权机制：GTWAY 指令（授权后单次 IO 生效）
-- 调试工具：字节码反汇编 + 执行追踪摘要
-- 编译器降级：WHILE/FOR 等高级结构转换为 JZ/JMP
-- 内存管理：ALLOC/FREE 动态内存分配
-- 测试套件：13 个示例程序
+### 已完成
 
-进行中（文档级别已定义，代码后续可逐步补齐）：
-- 更严格的结构化控制流验证
-- 更完善的错误码覆盖与测试矩阵
-- 与 M-Token 规范的一致性校验与版本化
+- **MVM 虚拟机核心**：全 varint 解码、栈机执行、调用帧管理
+- **Core 指令集 (0-99)**：B/E/IF/WH/FR/FN/RT/CL/PH, LIT/V/LET/SET, LT/GT/LE/GE/EQ, ADD/SUB/MUL/DIV/AND, OR/XOR/SHL/SHR, LEN/GET/PUT/SWP, DUP/DRP/ROT, IOW/IOR, GTWAY/WAIT/HALT/TRACE/GC/BP/STEP
+- **Extension 指令 (100-199)**：JMP/JZ/JNZ, MOD/NEG/NEQ, NEWARR/IDX/STO
+- **平台扩展 (200-239)**：ALLOC/FREE
+- **安全约束**：
+  - Step limit（最大执行步数）
+  - Gas limit（可选资源计费）
+  - Call depth limit（函数调用深度限制，默认 32）
+  - Stack limit（运行时栈大小限制）
+  - 栈/局部/全局/PC 越界检查
+- **授权机制**：GTWAY 指令（授权后 IO 生效）
+- **字节码验证器**：静态验证 opcode/varint/B-E匹配/结构检查/locals访问
+- **调试工具**：反汇编、执行追踪、TRACE
+- **内存管理**：动态内存分配 (ALLOC/FREE) + GC 支持
+- **测试套件**：14+ 个示例程序
+
+### 进行中
+
+- 更完善的栈效应验证
+- 更多故障码测试覆盖
+- 文档与规范持续同步
 
 ---
 
@@ -40,14 +49,15 @@ M-Language 由三层构成：
 ```text
 M-Language-Core/
 ├── include/
-│   └── m_vm.h            # VM 数据结构、指令/错误码定义
+│   ├── m_vm.h            # VM 数据结构、指令/错误码定义
+│   └── validator.h       # 字节码验证器接口
 ├── src/
 │   ├── m_vm.c            # 虚拟机核心实现
 │   ├── disasm.c          # 反汇编与追踪输出
-│   └── mian.c            # 测试套件与示例程序
-├── M-Token规范.md
-├── M 语言体系完整大纲.md
-├── 基本构思.txt
+│   ├── validator.c       # 字节码验证器实现
+│   └── main.c            # 测试套件与示例程序
+├── M-Token规范.md        # M-Token 指令集规范
+├── M 语言体系完整大纲.md  # 体系结构说明
 └── README.md
 ```
 
@@ -55,106 +65,198 @@ M-Language-Core/
 
 ## 快速运行
 
-本项目是标准的 C 工程，直接编译 `mian.c` 可运行测试套件。
+本项目是标准的 C 工程，直接编译 `main.c` 可运行测试套件。
 
-Windows + MSVC（示例）：
+### Windows + MSVC
+
 ```powershell
-cl /I include src\m_vm.c src\disasm.c src\mian.c
+cl /I include src\m_vm.c src\disasm.c src\validator.c src\main.c
+.\main.exe
 ```
 
-运行后将输出：
+### Linux/macOS + GCC/Clang
+
+```bash
+gcc -I include src/m_vm.c src/disasm.c src/validator.c src/main.c -o main
+./main
+```
+
+### 运行输出
+
 - 反汇编结果
 - 执行结果/故障码
--（可选）执行追踪摘要
+- 执行追踪摘要（如启用）
 
 ---
 
-## 指令表（核心摘录）
+## 指令表
 
-说明：所有 opcode 与参数均采用 LEB128 varint 编码。下表为**逻辑编号**（即解码后的 opcode 值）。
+**说明**：所有 opcode 与参数均采用 LEB128 varint 编码。下表为逻辑编号。
 
-|  分组  |  指令  | 值 |  作用  |
+### Core 指令集 (0-99，冻结)
+
+| 分组 | 指令 | 值 | 作用 |
 | :-- | :-- | :-- | :-- |
-| Control | `B` / `E` | 10 / 11 | 结构化块起止 |
-| Control | `IF` | 12 | 条件结构：`<cond>,IF,B,<then>,E,B,<else>,E` |
-| Control | `JZ` / `JMP` | 13 / 14 | 条件跳转 / 无条件跳转 |
-| Control | `FN` / `CL` / `RT` | 15 / 17 / 16 | 函数定义 / 调用 / 返回 |
-| Data | `LIT` | 30 | 字面量入栈 |
-| Data | `V` / `LET` / `SET` | 31 / 32 / 33 | 读局部 / 写局部 / 写全局 |
-| Compare | `LT` `GT` `LE` `GE` `EQ` | 40-44 | 比较指令 |
-| Math | `ADD` `SUB` `MUL` `DIV` `MOD` | 50-54 | 算术运算 |
-| Bit | `AND` `OR` `XOR` `SHL` `SHR` | 55-59 | 位运算 |
-| Array | `LEN` `NEWARR` `IDX` `STO` | 60-63 | 数组长度/创建/索引/存储 |
-| Stack | `DUP` `DRP` `ROT` | 64-66 | 栈操作 |
-| Array | `GET` `PUT` | 67-68 | 数组读/写 |
-| Stack | `SWP` | 69 | 交换栈顶两个元素 |
-| IO | `IOW` / `IOR` | 70 / 71 | IO 写 / IO 读 |
-| Memory | `ALLOC` / `FREE` | 90 / 91 | 动态内存分配 / 释放 |
-| System | `GTWAY` `WAIT` `HALT` `TRACE` | 80 / 81 / 82 / 83 | 授权 / 延时 / 停止 / 追踪 |
+| **控制流** | `B` / `E` | 10 / 11 | 结构化块起止 |
+| | `IF` | 12 | 条件：`<cond>,IF,B<t>,E,B<e>,E` |
+| | `WH` | 13 | 循环：`<cond>,WH,B<body>,E` |
+| | `FR` | 14 | 循环：`<i>,<c>,<inc>,FR,B<body>,E` |
+| | `FN` | 15 | 函数定义：`<arity>,B<body>,E` |
+| | `RT` | 16 | 返回：`<value>` |
+| | `CL` | 17 | 调用：`<func_id>,<argc>,<args...>` |
+| | `PH` | 18 | 占位符 |
+| **数据** | `LIT` | 30 | 字面量入栈（支持 zigzag i64 负数） |
+| | `V` | 31 | 读局部（DeBruijn 索引） |
+| | `LET` | 32 | 写局部 |
+| | `SET` | 33 | 写全局 |
+| **比较** | `LT` / `GT` / `LE` / `GE` / `EQ` | 40-44 | 比较运算，结果 0/1 |
+| **算术** | `ADD` / `SUB` / `MUL` / `DIV` | 50-53 | 算术运算 |
+| | `AND` | 54 | 按位与 |
+| **位运算** | `OR` / `XOR` / `SHL` / `SHR` | 55-58 | 位运算（SHR/SHL 移位量自动 mask 63） |
+| **数组** | `LEN` / `GET` / `PUT` / `SWP` | 60-63 | 数组长度/读取/写入/交换 |
+| **栈操作** | `DUP` / `DRP` / `ROT` | 64-66 | 复制/丢弃/旋转 |
+| **硬件IO** | `IOW` / `IOR` | 70 / 71 | IO 写 / IO 读 |
+| **系统** | `GTWAY` / `WAIT` / `HALT` / `TRACE` | 80-83 | 授权/延时/停止/追踪 |
+| | `GC` / `BP` / `STEP` | 84-86 | GC/断点/单步 |
+
+### Extension 指令 (100-199，可选)
+
+| 指令 | 值 | 作用 |
+| :-- | :-- | :-- |
+| `JMP` | 100 | 无条件跳转（svarint offset） |
+| `JZ` | 101 | 条件为零跳转 |
+| `JNZ` | 102 | 条件非零跳转 |
+| `MOD` | 110 | 取模（C 语义，符号与被除数一致） |
+| `NEG` | 111 | 取反 |
+| `NOT` | 112 | 按位取反 |
+| `NEQ` | 113 | 不等于 |
+| `NEWARR` | 120 | 创建数组 |
+| `IDX` / `STO` | 121-122 | 数组索引/存储 |
+
+### 平台扩展 (200-239)
+
+| 指令 | 值 | 作用 |
+| :-- | :-- | :-- |
+| `ALLOC` / `FREE` | 200 / 201 | 动态内存分配/释放 |
 
 完整定义见 `include/m_vm.h` 与 `M-Token规范.md`。
 
 ---
 
-## 指令与执行模型（简述）
+## 核心语义
 
-- **编码**：所有 opcode 与操作数均为 LEB128 varint
-- **执行模型**：栈式为主，函数调用使用局部变量帧
-- **授权**：GTWAY 后允许单次 IOW，执行后授权自动失效
-- **约束**：step limit + gas limit + 多类边界检查
+### 值与类型
 
-更完整说明请看 `M-Token规范.md` 与 `M 语言体系完整大纲.md`。
+- **核心数值类型**：i64（int64_t）
+- **布尔语义**：0 = false，非 0 = true
+- **算术运算**：二进制补码 wrap-around
+- **除法**：除零 trap
+- **移位**：移位量自动应用 `& 63` mask
+- **数组**：引用语义，越界访问 trap
+
+### 执行约束
+
+- **Step limit**：限制最大执行步数
+- **Call depth limit**：限制函数调用深度（默认 32）
+- **Stack limit**：运行时可配置的栈大小限制
+- **Gas limit**：可选资源计费
+- **IO 授权**：GTWAY 后 IO 操作生效
+
+### 故障模型
+
+所有约束违规触发 trap，立即终止执行并返回 fault code：
+
+| 故障 | 场景 |
+| :-- | :-- |
+| `STACK_OVERFLOW` | 栈上溢/超出 stack_limit |
+| `STACK_UNDERFLOW` | 栈下溢 |
+| `PC_OOB` | 程序计数器越界 |
+| `DIV_BY_ZERO` | 除零 |
+| `LOCALS_OOB` / `GLOBALS_OOB` | 变量访问越界 |
+| `ARRAY_OOB` | 数组索引越界 |
+| `CALL_DEPTH_LIMIT` | 函数调用深度超限 |
+| `UNAUTHORIZED_IO` | 未授权的 IO 操作 |
 
 ---
 
-## 运行输出示例（节选）
+## 字节码验证器
 
-以下为运行测试套件时的典型输出片段（实际输出与编译环境、日志开关有关）：
+M-Language 提供静态验证器 `m_validate()`，在执行前检查字节码合法性：
 
-```text
+```c
+#include "validator.h"
+
+M_ValidatorResult result = m_validate(code, code_len);
+if (!result.valid) {
+    printf("Validation failed at PC %d: %s\n", result.pc, result.msg);
+}
+```
+
+### 验证检查项
+
+1. opcode 合法性（0-199 范围内）
+2. varint 编码完整性
+3. B/E 块匹配
+4. IF/WH/FR 结构正确
+5. locals 访问不越界
+
+---
+
+## 运行输出示例
+
+```
 M Language Virtual Machine - Test Suite
+========================================
+
 Program: Arithmetic (5 + 3 * 2)
 Bytecode size: 9 bytes
-... disassembly ...
+=== Disassembly ===
+LIT 5
+LIT 3
+LIT 2
+MUL
+ADD
+=== Execution ===
 Execution result: fault=NONE, steps=6, result=11
 
-Program: Function (add 5 + 3)
-... disassembly ...
-Execution Trace Summary
-Completed: YES
-Steps: 8
-Result: 8
+Program: While Loop (sum 1 to 5)
+...
 ```
 
 ---
 
-## 里程碑方向（简化版）
+## 里程碑
 
-短期（已完成）：
-- M-Token 规范与 VM 行为的 1:1 对齐
-- WHILE 循环编译降级
-- FOR 循环编译降级
-- ALLOC/FREE 动态内存管理
-- 增加更多测试覆盖（边界/故障码/非法字节码）
+### 已完成 (v2.0)
 
-中期：
-- 字节码验证器（静态检查）
-- 更完善的调试与可视化工具
+- M-Token 规范与 VM 1:1 对齐
+- Core/Extension/Platform 指令空间分离
+- WHILE/FOR 循环编译降级支持
+- 结构化字节码验证器
+- Call depth / Stack limit 运行时检查
+- LIT zigzag i64 负数支持
+- 完整故障码覆盖
 
-长期：
-- 面向嵌入式的裁剪版 MVM
-- AI 到 M-Token 的编译/约束生成工具链
+### 中期目标
+
+- 更完善的栈效应验证
+- 跨平台移植（MVM 嵌入式版本）
+- AI 到 M-Token 编译工具链
+
+### 长期方向
+
+- JIT 编译支持
+- 高级优化（常量折叠、死代码消除）
+- 多设备协作执行
 
 ---
 
-## 贡献指南（简版）
+## 贡献指南
 
-- 代码风格：保持现有 C 风格与命名方式；新增功能先写小型 demo 到 `mian.c`
-- 测试要求：新增指令或 VM 行为需补充最小可运行样例
-- 提交内容：避免引入与核心 VM 无关的大型依赖
-- 文档同步：变更 opcode/语义时需更新 `M-Token规范.md`
-
-如果需要更细的协作流程或版本规范，可以在此基础上扩展。
+- **代码风格**：保持现有 C 风格，新增功能先写 demo 到 `main.c`
+- **测试要求**：新增指令或 VM 行为需补充测试用例
+- **提交规范**：避免引入无关依赖
+- **文档同步**：变更 opcode/语义时需更新 `M-Token规范.md`
 
 ---
 
@@ -162,4 +264,4 @@ Result: 8
 
 Copyright (c) 2026 MYJ-GOD. All Rights Reserved.
 
-开源许可：MIT License
+MIT License

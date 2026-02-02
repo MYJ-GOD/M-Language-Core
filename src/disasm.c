@@ -153,15 +153,75 @@ static void disasm_scan_labels(DisasmContext* ctx) {
                 pc = pc2;
                 break;
             }
-            case M_JZ: {
-                /* <cond>,JZ,<target> - jump if zero */
-                int target = 0;
+            case M_FR: {
+                /* <init>,<cond>,<inc>,FR,B<body>,E - for loop */
+                /* Find matching E */
                 int pc2 = pc;
-                m_vm_decode_uvarint(ctx->code, &pc2, ctx->len, &target);
-                char name[32];
-                snprintf(name, sizeof(name), "L%d", target);
-                disasm_add_label(ctx, target, name, LABEL_JUMP_IN);
+                int depth = 0;
+                while (depth >= 0 && pc2 < ctx->len) {
+                    uint32_t t = 0;
+                    int next = pc2;
+                    m_vm_decode_uvarint(ctx->code, &next, ctx->len, &t);
+                    if (t == M_B) depth++;
+                    else if (t == M_E) depth--;
+                    if (depth >= 0) pc2 = next;
+                }
                 pc = pc2;
+                break;
+            }
+            case M_WH: {
+                /* <cond>,WH,B<body>,E - while loop */
+                /* Find matching E */
+                int pc2 = pc;
+                int depth = 0;
+                while (depth >= 0 && pc2 < ctx->len) {
+                    uint32_t t = 0;
+                    int next = pc2;
+                    m_vm_decode_uvarint(ctx->code, &next, ctx->len, &t);
+                    if (t == M_B) depth++;
+                    else if (t == M_E) depth--;
+                    if (depth >= 0) pc2 = next;
+                }
+                pc = pc2;
+                break;
+            }
+            case M_JZ: {
+                /* <cond>,JZ,<offset> - jump if zero (signed varint encoded relative offset) */
+                int16_t offset = 0;
+                int pc2 = pc;
+                if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
+                    int target = pc2 + offset;
+                    char name[32];
+                    snprintf(name, sizeof(name), "L%d", target);
+                    disasm_add_label(ctx, target, name, LABEL_JUMP_IN);
+                    pc = pc2;
+                }
+                break;
+            }
+            case M_JNZ: {
+                /* <cond>,JNZ,<offset> - jump if not zero (signed varint encoded relative offset) */
+                int16_t offset = 0;
+                int pc2 = pc;
+                if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
+                    int target = pc2 + offset;
+                    char name[32];
+                    snprintf(name, sizeof(name), "L%d", target);
+                    disasm_add_label(ctx, target, name, LABEL_JUMP_IN);
+                    pc = pc2;
+                }
+                break;
+            }
+            case M_JMP: {
+                /* JMP,<offset> - unconditional jump (signed varint encoded relative offset) */
+                int16_t offset = 0;
+                int pc2 = pc;
+                if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
+                    int target = pc2 + offset;
+                    char name[32];
+                    snprintf(name, sizeof(name), "L%d", target);
+                    disasm_add_label(ctx, target, name, LABEL_JUMP_IN);
+                    pc = pc2;
+                }
                 break;
             }
             case M_B: {
@@ -196,19 +256,45 @@ static void disasm_scan_labels(DisasmContext* ctx) {
             case M_IOR:
             case M_ALLOC:
             case M_TRACE:
-            case M_PH:
             case M_HALT:
-            case M_DWHL:
-            case M_GC:
             case M_BP: {
-                /* These instructions have operands */
+                /* These instructions have unsigned varint operands */
                 uint32_t val = 0;
                 int pc2 = pc;
                 m_vm_decode_uvarint(ctx->code, &pc2, ctx->len, &val);
                 pc = pc2;
                 break;
             }
-            case M_NEWARR:
+            case M_PH:
+                /* PH (placeholder) has no operands - it's just for alignment/padding */
+                break;
+            case M_DWHL: {
+                /* DWHL,<offset> - do-while loop end (signed varint encoded relative offset) */
+                int16_t offset = 0;
+                int pc2 = pc;
+                if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
+                    int target = pc2 + offset;
+                    char name[32];
+                    snprintf(name, sizeof(name), "L%d", target);
+                    disasm_add_label(ctx, target, name, LABEL_JUMP_IN);
+                    pc = pc2;  /* IMPORTANT: advance PC past the offset */
+                }
+                break;
+            }
+            case M_WHIL: {
+                /* WHILE,<offset> - while loop (signed varint encoded relative offset) */
+                int16_t offset = 0;
+                int pc2 = pc;
+                if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
+                    int target = pc2 + offset;
+                    char name[32];
+                    snprintf(name, sizeof(name), "L%d", target);
+                    disasm_add_label(ctx, target, name, LABEL_JUMP_IN);
+                    pc = pc2;  /* IMPORTANT: advance PC past the offset */
+                }
+                break;
+            }
+            case M_GC:
             case M_LEN:
             case M_IDX:
             case M_STO:
@@ -360,7 +446,7 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
         }
         
         /* Comparison ops */
-        case M_LT: case M_GT: case M_LE: case M_GE: case M_EQ:
+        case M_LT: case M_GT: case M_LE: case M_GE: case M_EQ: case M_NEQ:
             /* No args */
             break;
         
@@ -368,6 +454,7 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
         case M_ADD: case M_SUB: case M_MUL: case M_DIV: case M_MOD:
         case M_AND: case M_OR: case M_XOR:
         case M_SHL: case M_SHR:
+        case M_NEG: case M_NOT:
             /* No args */
             break;
 
@@ -405,39 +492,84 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
             disasm_printf(ctx, "<cond>,B<then>,E,B<else>,E");
             break;
         }
-        
-        case M_JZ: {
-            uint32_t target = 0;
-            int pc2 = *next_pc;
-            if (m_vm_decode_uvarint(ctx->code, &pc2, ctx->len, &target)) {
-                disasm_printf(ctx, "L%u", (unsigned)target);
-                *next_pc = pc2;
-            } else {
-                disasm_printf(ctx, "<target>");
-            }
+
+        case M_WH: {
+            disasm_printf(ctx, "<cond>,WH,B<body>,E");
+            break;
+        }
+
+        case M_FR: {
+            disasm_printf(ctx, "<init>,<cond>,<inc>,FR,B<body>,E");
             break;
         }
         
-        case M_JMP: {
-            uint32_t target = 0;
+        case M_JZ: {
+            /* <cond>,JZ,<offset> - jump if zero (signed varint encoded relative offset) */
+            int16_t offset = 0;
             int pc2 = *next_pc;
-            if (m_vm_decode_uvarint(ctx->code, &pc2, ctx->len, &target)) {
-                disasm_printf(ctx, "L%u", (unsigned)target);
+            if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
+                int target = pc2 + offset;
+                disasm_printf(ctx, "L%d", target);
+                disasm_add_label(ctx, target, "L", LABEL_JUMP_IN);
                 *next_pc = pc2;
             } else {
-                disasm_printf(ctx, "<target>");
+                disasm_printf(ctx, "<offset>");
+            }
+            break;
+        }
+
+        case M_JNZ: {
+            /* <cond>,JNZ,<offset> - jump if not zero (signed varint encoded relative offset) */
+            int16_t offset = 0;
+            int pc2 = *next_pc;
+            if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
+                int target = pc2 + offset;
+                disasm_printf(ctx, "L%d", target);
+                disasm_add_label(ctx, target, "L", LABEL_JUMP_IN);
+                *next_pc = pc2;
+            } else {
+                disasm_printf(ctx, "<offset>");
+            }
+            break;
+        }
+
+        case M_JMP: {
+            int16_t offset = 0;
+            int pc2 = *next_pc;
+            if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
+                int target = pc2 + offset;
+                disasm_printf(ctx, "L%d", target);
+                disasm_add_label(ctx, target, "L", LABEL_JUMP_IN);
+                *next_pc = pc2;
+            } else {
+                disasm_printf(ctx, "<offset>");
             }
             break;
         }
         
         case M_DWHL: {
-            uint32_t target = 0;
+            int16_t offset = 0;
             int pc2 = *next_pc;
-            if (m_vm_decode_uvarint(ctx->code, &pc2, ctx->len, &target)) {
-                disasm_printf(ctx, "L%u, <cond>", (unsigned)target);
+            if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
+                int target = pc2 + offset;
+                disasm_printf(ctx, "L%d, <cond>", target);
                 *next_pc = pc2;
             } else {
-                disasm_printf(ctx, "<target>, <cond>");
+                disasm_printf(ctx, "<offset>, <cond>");
+            }
+            break;
+        }
+        
+        case M_WHIL: {
+            int16_t offset = 0;
+            int pc2 = *next_pc;
+            if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
+                int target = pc2 + offset;
+                disasm_printf(ctx, "L%d", target);
+                disasm_add_label(ctx, target, "L", LABEL_JUMP_IN);
+                *next_pc = pc2;
+            } else {
+                disasm_printf(ctx, "<offset>");
             }
             break;
         }
