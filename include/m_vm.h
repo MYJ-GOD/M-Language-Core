@@ -86,6 +86,9 @@
 #define M_WAIT  81  /* Wait/Delay: WAIT,<milliseconds> */
 #define M_HALT  82  /* Halt execution */
 #define M_TRACE 83  /* Trace/Debug: TRACE,<level> */
+#define M_GC    84  /* Manual GC trigger: GC */
+#define M_BP    85  /* Breakpoint: BP,<id> */
+#define M_STEP  86  /* Single step: STEP */
 
 /* --- VM Configuration --- */
 #define STACK_SIZE     256
@@ -116,7 +119,9 @@ typedef enum {
     M_FAULT_INDEX_OOB,
     M_FAULT_BAD_ARG,        /* Invalid argument (e.g., negative size) */
     M_FAULT_OOM,            /* Out of memory */
-    M_FAULT_ASSERT_FAILED
+    M_FAULT_ASSERT_FAILED,
+    M_FAULT_BREAKPOINT,     /* Breakpoint hit */
+    M_FAULT_DEBUG_STEP      /* Single-step pause */
 } M_Fault;
 
 /* Authorization key */
@@ -215,6 +220,13 @@ typedef struct M_VM {
 
     /* Memory allocation tracking */
     AllocNode* alloc_head;
+    int        alloc_count;      /* Total allocations since last GC */
+    int        gc_threshold;     /* Trigger GC when count exceeds this */
+    bool       gc_enabled;       /* Enable automatic GC */
+
+    /* Debugging state */
+    bool       single_step;      /* Single-step mode */
+    int        breakpoint_id;    /* Current breakpoint */
 
     /* State */
     bool     running;
@@ -253,11 +265,7 @@ uint32_t m_vm_encode_zigzag(int32_t n);
  * Core Interface
  * ============================================= */
 
-void m_vm_init(M_VM* vm, uint8_t* code, int len,
-               void (*io_w)(uint8_t, M_Value),
-               M_Value (*io_r)(uint8_t),
-               void (*sleep)(int32_t),
-               void (*trace)(uint32_t, const char*));
+void m_vm_init(M_VM* vm, uint8_t* code, int len, void* io_w, void* io_r, void* sleep, void* trace);
 
 void m_vm_set_step_limit(M_VM* vm, uint64_t limit);
 
@@ -281,6 +289,22 @@ int m_vm_stack_snapshot(M_VM* vm, M_Value* out_stack);
 
 /* Destroy VM and free all allocated memory */
 void m_vm_destroy(M_VM* vm);
+
+/* Garbage Collection */
+void m_vm_gc(M_VM* vm);              /* Trigger garbage collection */
+void m_vm_gc_enable(M_VM* vm, bool enable);  /* Enable/disable auto GC */
+void m_vm_set_gc_threshold(M_VM* vm, int threshold);  /* Set GC threshold */
+
+/* Debugging */
+void m_vm_single_step(M_VM* vm, bool enable);  /* Enable/disable single-step */
+int m_vm_set_breakpoint(M_VM* vm, int pc, int id);  /* Set breakpoint */
+int m_vm_clear_breakpoint(M_VM* vm, int pc);  /* Clear breakpoint */
+void m_vm_clear_all_breakpoints(M_VM* vm);  /* Clear all breakpoints */
+
+/* JIT Compilation */
+void m_vm_jit_enable(M_VM* vm, bool enable);  /* Enable/disable JIT */
+void m_vm_jit_set_threshold(M_VM* vm, int threshold);  /* Set JIT threshold */
+bool m_vm_jit_compile(M_VM* vm, int start_pc, int end_pc);  /* Compile bytecode range */
 
 /* =============================================
  * High-Level API (M-Token format support)

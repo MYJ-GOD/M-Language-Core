@@ -249,6 +249,254 @@ static void h_free(M_VM* v) {
     free(ref.u.ref);
 }
 
+/* =============================================
+ * Garbage Collection (Mark-Sweep)
+ * ============================================= */
+
+void m_vm_gc_enable(M_VM* v, bool enable) {
+    v->gc_enabled = enable;
+}
+
+void m_vm_set_gc_threshold(M_VM* v, int threshold) {
+    v->gc_threshold = threshold > 0 ? threshold : 100;
+}
+
+/* Mark a value as reachable during GC */
+static void gc_mark_value(M_VM* v, M_Value val, AllocNode** marked, int* marked_count) {
+    if (val.type != M_TYPE_REF || val.u.ref == NULL) {
+        return;
+    }
+    
+    /* Check if already marked */
+    for (int i = 0; i < *marked_count; i++) {
+        if (marked[i]->ptr == val.u.ref) {
+            return;
+        }
+    }
+    
+    /* Find and mark this allocation */
+    AllocNode* node = v->alloc_head;
+    while (node) {
+        if (node->ptr == val.u.ref) {
+            /* Mark as reachable */
+            marked[*marked_count] = node;
+            (*marked_count)++;
+            
+            /* For now, we only track direct pointers.
+             * In a full implementation, we'd traverse structures. */
+            return;
+        }
+        node = node->next;
+    }
+}
+
+/* Mark all reachable values from stacks and locals */
+static void gc_mark_all(M_VM* v, AllocNode** marked, int* marked_count) {
+    /* Mark stack values */
+    for (int i = 0; i <= v->sp; i++) {
+        gc_mark_value(v, v->stack[i], marked, marked_count);
+    }
+    
+    /* Mark return stack (addresses are not refs, skip) */
+    
+    /* Mark locals */
+    for (int i = 0; i < LOCALS_SIZE; i++) {
+        gc_mark_value(v, v->locals[i], marked, marked_count);
+    }
+    
+    /* Mark locals frames */
+    for (int f = 0; f <= v->frame_sp; f++) {
+        for (int i = 0; i < LOCALS_SIZE; i++) {
+            gc_mark_value(v, v->locals_frames[f][i], marked, marked_count);
+        }
+    }
+    
+    /* Mark globals */
+    for (int i = 0; i < GLOBALS_SIZE; i++) {
+        gc_mark_value(v, v->globals[i], marked, marked_count);
+    }
+}
+
+void m_vm_gc(M_VM* v) {
+    /* Count current allocations */
+    int alloc_count = 0;
+    AllocNode* node = v->alloc_head;
+    while (node) {
+        alloc_count++;
+        node = node->next;
+    }
+    
+    if (alloc_count == 0) {
+        return;  /* Nothing to collect */
+    }
+    
+    /* Allocate marked array */
+    AllocNode** marked = (AllocNode**)calloc((size_t)alloc_count, sizeof(AllocNode*));
+    if (!marked) {
+        return;  /* Out of memory, can't GC */
+    }
+    
+    int marked_count = 0;
+    
+    /* Mark all reachable values */
+    gc_mark_all(v, marked, &marked_count);
+    
+    /* Sweep unreachable allocations */
+    AllocNode** p = &v->alloc_head;
+    while (*p) {
+        /* Check if this node is marked (reachable) */
+        bool is_marked = false;
+        for (int i = 0; i < marked_count; i++) {
+            if (marked[i] == *p) {
+                is_marked = true;
+                break;
+            }
+        }
+        
+        if (!is_marked) {
+            /* Unreachable - free it */
+            AllocNode* to_free = *p;
+            free(to_free->ptr);
+            *p = to_free->next;
+            free(to_free);
+        } else {
+            p = &(*p)->next;
+        }
+    }
+    
+    free(marked);
+    
+    /* Reset allocation counter */
+    v->alloc_count = 0;
+    
+    /* Call trace hook if available */
+    if (v->trace) {
+        v->trace(1, "GC completed");
+    }
+}
+
+/* Trigger GC check (called after each ALLOC) */
+static void gc_check(M_VM* v) {
+    if (!v->gc_enabled) {
+        return;
+    }
+    
+    v->alloc_count++;
+    
+    if (v->alloc_count >= v->gc_threshold) {
+        m_vm_gc(v);
+    }
+}
+
+static void h_gc(M_VM* v) {
+    /* Manual GC trigger: GC */
+    m_vm_gc(v);
+}
+
+/* =============================================
+ * Debugging Support
+ * ============================================= */
+
+/* Breakpoint tracking */
+#define MAX_BREAKPOINTS 16
+typedef struct {
+    int pc;
+    int id;
+    bool active;
+} Breakpoint;
+
+static Breakpoint breakpoints[MAX_BREAKPOINTS];
+static int breakpoint_count = 0;
+
+void m_vm_single_step(M_VM* v, bool enable) {
+    v->single_step = enable;
+}
+
+int m_vm_set_breakpoint(M_VM* v, int pc, int id) {
+    if (breakpoint_count >= MAX_BREAKPOINTS) {
+        return -1;  /* No room */
+    }
+    
+    /* Check if breakpoint already exists at this PC */
+    for (int i = 0; i < breakpoint_count; i++) {
+        if (breakpoints[i].pc == pc) {
+            breakpoints[i].id = id;
+            breakpoints[i].active = true;
+            return id;
+        }
+    }
+    
+    /* Add new breakpoint */
+    breakpoints[breakpoint_count].pc = pc;
+    breakpoints[breakpoint_count].id = id;
+    breakpoints[breakpoint_count].active = true;
+    breakpoint_count++;
+    
+    return id;
+}
+
+int m_vm_clear_breakpoint(M_VM* v, int pc) {
+    for (int i = 0; i < breakpoint_count; i++) {
+        if (breakpoints[i].pc == pc) {
+            breakpoints[i].active = false;
+            return breakpoints[i].id;
+        }
+    }
+    return -1;
+}
+
+void m_vm_clear_all_breakpoints(M_VM* v) {
+    for (int i = 0; i < breakpoint_count; i++) {
+        breakpoints[i].active = false;
+    }
+}
+
+/* Check if there's a breakpoint at current PC */
+static int check_breakpoint(M_VM* v) {
+    for (int i = 0; i < breakpoint_count; i++) {
+        if (breakpoints[i].active && breakpoints[i].pc == v->pc) {
+            return breakpoints[i].id;
+        }
+    }
+    return -1;
+}
+
+static void h_bp(M_VM* v) {
+    /* Breakpoint: BP,<id> - set a breakpoint at this location */
+    int pc = v->pc;
+    uint32_t id = 0;
+    int next_pc = pc;
+    
+    if (m_vm_decode_uvarint(v->code, &next_pc, v->code_len, &id)) {
+        v->pc = next_pc;
+        m_vm_set_breakpoint(v, pc, (int)id);
+    }
+}
+
+static void h_step(M_VM* v) {
+    /* Single step: STEP - enable single-step mode for one instruction */
+    v->single_step = true;
+}
+
+/* =============================================
+ * JIT Compilation (Stub implementations)
+ * ============================================= */
+
+void m_vm_jit_enable(M_VM* v, bool enable) {
+    (void)v; (void)enable;
+}
+
+void m_vm_jit_set_threshold(M_VM* v, int threshold) {
+    (void)v; (void)threshold;
+}
+
+bool m_vm_jit_compile(M_VM* v, int start_pc, int end_pc) {
+    (void)v; (void)start_pc; (void)end_pc;
+    return false;
+}
+
+/* --- Stack Operations --- */
+
 static void h_rot(M_VM* v) {
     NEED(v, 3);
     M_Value a = v->stack[v->sp - 2];
@@ -891,7 +1139,10 @@ static const uint32_t GAS_COST[256] = {
     [M_TRACE]  = 1,
     [M_PH]     = 0,
     [M_DWHL]   = 1,
-    [M_DO]     = 0
+    [M_DO]     = 0,
+    [M_GC]     = 10,    /* GC costs more (scans all memory) */
+    [M_BP]     = 1,
+    [M_STEP]   = 0
 };
 
 /* =============================================
@@ -948,7 +1199,10 @@ static const handler TABLE[256] = {
     [M_TRACE]  = h_trace,
     [M_PH]     = h_ph,
     [M_DWHL]   = h_dwhl,
-    [M_DO]     = h_do
+    [M_DO]     = h_do,
+    [M_GC]     = h_gc,
+    [M_BP]     = h_bp,
+    [M_STEP]   = h_step
 };
 
 /* =============================================
@@ -956,10 +1210,7 @@ static const handler TABLE[256] = {
  * ============================================= */
 
 void m_vm_init(M_VM* vm, uint8_t* code, int len,
-               void (*io_w)(uint8_t, M_Value),
-               M_Value (*io_r)(uint8_t),
-               void (*sleep)(int32_t),
-               void (*trace)(uint32_t, const char*)) {
+               void* io_w, void* io_r, void* sleep, void* trace) {
     memset(vm, 0, sizeof(M_VM));
     vm->code = code;
     vm->code_len = len;
@@ -976,11 +1227,8 @@ void m_vm_init(M_VM* vm, uint8_t* code, int len,
     vm->local_count = 0;
     vm->frame_sp = -1;
     vm->alloc_head = NULL;
-
-    vm->io_write = io_w;
-    vm->io_read = io_r;
-    vm->sleep_ms = sleep;
-    vm->trace = trace;
+    vm->gc_enabled = false;
+    vm->gc_threshold = 100;
 }
 
 void m_vm_set_step_limit(M_VM* vm, uint64_t limit) { 
@@ -1079,6 +1327,12 @@ int m_vm_step(M_VM* vm) {
     }
 
     TABLE[op8](vm);
+
+    /* Check for single-step mode - pause after executing this instruction */
+    if (vm->single_step) {
+        vm->single_step = false;
+        vm->running = false;
+    }
 
     if (!vm->running) {
         return vm->fault ? -(int)vm->fault : 1;
@@ -1291,6 +1545,9 @@ const char* m_vm_opcode_name(uint32_t op) {
         case M_WAIT:  return "WAIT";
         case M_HALT:  return "HALT";
         case M_TRACE: return "TRACE";
+        case M_GC:    return "GC";
+        case M_BP:    return "BP";
+        case M_STEP:  return "STEP";
 
         default:     return "UNK";
     }

@@ -438,6 +438,75 @@ static ByteBuf build_stack_overflow_demo(void) {
 }
 
 /* =============================================
+ * GC and Debugging Demos
+ * ============================================= */
+
+/* Program 15: Garbage Collection demo
+ * Demonstrates automatic memory reclamation.
+ * Allocates many small objects, then triggers GC.
+ */
+static ByteBuf build_gc_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+    
+    /* Allocate several small objects */
+    for (int i = 0; i < 5; i++) {
+        emit_op(&b, M_LIT);  emit_uvar(&b, 16);     /* size = 16 */
+        emit_op(&b, M_ALLOC);                        /* ALLOC opcode */
+        emit_uvar(&b, 16);                           /* size */
+        emit_op(&b, M_DRP);                          /* drop ref (creates garbage) */
+    }
+    
+    /* Trigger manual GC */
+    emit_op(&b, M_GC);                               /* Manual GC trigger */
+    
+    /* Return success */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 1);
+    emit_op(&b, M_HALT);
+    
+    return b;
+}
+
+/* Program 16: Breakpoint demo
+ * Demonstrates breakpoint functionality.
+ */
+static ByteBuf build_breakpoint_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+    
+    /* Set breakpoint at this location */
+    emit_op(&b, M_BP); emit_uvar(&b, 1);  /* BP, id=1 */
+    
+    /* Simple computation */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 10);
+    emit_op(&b, M_LIT);  emit_uvar(&b, 20);
+    emit_op(&b, M_ADD);
+    
+    emit_op(&b, M_HALT);
+    
+    return b;
+}
+
+/* Program 17: Single-step demo
+ * Demonstrates single-step execution mode.
+ */
+static ByteBuf build_single_step_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+    
+    /* Enable single-step for debugging */
+    emit_op(&b, M_STEP);                             /* Enable single-step */
+    
+    /* Simple computation */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
+    emit_op(&b, M_LIT);  emit_uvar(&b, 3);
+    emit_op(&b, M_ADD);                              /* 5 + 3 = 8 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 2);
+    emit_op(&b, M_MUL);                              /* 8 * 2 = 16 */
+    
+    emit_op(&b, M_HALT);
+    
+    return b;
+}
+
+/* =============================================
  * FOR Loop Compiler Lowering
  * ============================================= */
 
@@ -714,7 +783,7 @@ static void run_with_disasm(const char* name, ByteBuf* prog, bool do_simulate) {
     
     /* Execute */
     M_VM vm;
-    m_vm_init(&vm, prog->buf, prog->len, io_write, io_read, sleep_ms, trace_fn);
+    m_vm_init(&vm, prog->buf, prog->len, (void*)io_write, (void*)io_read, (void*)sleep_ms, (void*)trace_fn);
     m_vm_set_step_limit(&vm, 10000);
     
     if (do_simulate) {
@@ -759,6 +828,9 @@ int main(void) {
     ByteBuf p13 = build_memory_demo();
     ByteBuf p11b = build_do_while_demo();
     ByteBuf p14 = build_stack_overflow_demo();
+    ByteBuf p15 = build_gc_demo();
+    ByteBuf p16 = build_breakpoint_demo();
+    ByteBuf p17 = build_single_step_demo();
 
     /*run_with_disasm("Arithmetic (5 + 3 * 2)", &p1, false);
     run_with_disasm("Comparison (10 > 5)", &p2, false);
@@ -778,6 +850,9 @@ int main(void) {
     run_with_disasm("FOR Loop (compiler lowering)", &p12, true);
     run_with_disasm("Memory ALLOC/FREE", &p13, false);
     run_with_disasm("Stack Overflow Protection (recursive function triggers overflow)", &p14, true);
+    run_with_disasm("Garbage Collection (GC)", &p15, true);
+    run_with_disasm("Breakpoint Demo", &p16, true);
+    run_with_disasm("Single-Step Debugging (STEP)", &p17, true);
     
     printf("\n");
     printf("+================================================================+\n");

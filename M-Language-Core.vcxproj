@@ -135,7 +135,7 @@
     <ClInclude Include="include\m_vm.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\mian.c" />
+    <ClCompile Include="src\main.c" />
     <ClCompile Include="src\m_vm.c" />
     <ClCompile Include="src\disasm.c" />
   </ItemGroup>

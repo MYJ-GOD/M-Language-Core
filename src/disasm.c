@@ -198,7 +198,9 @@ static void disasm_scan_labels(DisasmContext* ctx) {
             case M_TRACE:
             case M_PH:
             case M_HALT:
-            case M_DWHL: {
+            case M_DWHL:
+            case M_GC:
+            case M_BP: {
                 /* These instructions have operands */
                 uint32_t val = 0;
                 int pc2 = pc;
@@ -517,6 +519,24 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
         }
 
         case M_FREE:
+            break;
+
+        case M_GC:
+            disasm_printf(ctx, "; garbage collection");
+            break;
+
+        case M_BP: {
+            uint32_t id = 0;
+            int after_pc = *next_pc;
+            if (m_vm_decode_uvarint(ctx->code, &after_pc, ctx->len, &id)) {
+                disasm_printf(ctx, "%u", (unsigned)id);
+                *next_pc = after_pc;
+            }
+            break;
+        }
+        
+        case M_STEP:
+            disasm_printf(ctx, "; enable single-step");
             break;
 
         case M_TRACE: {
