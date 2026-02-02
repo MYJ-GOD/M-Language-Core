@@ -21,8 +21,8 @@ M-Language 由三层构成：
 ### 已完成
 
 - **MVM 虚拟机核心**：全 varint 解码、栈机执行、调用帧管理
-- **Core 指令集 (0-99)**：B/E/IF/WH/FR/FN/RT/CL/PH, LIT/V/LET/SET, LT/GT/LE/GE/EQ, ADD/SUB/MUL/DIV/AND, OR/XOR/SHL/SHR, LEN/GET/PUT/SWP, DUP/DRP/ROT, IOW/IOR, GTWAY/WAIT/HALT/TRACE/GC/BP/STEP
-- **Extension 指令 (100-199)**：JMP/JZ/JNZ, MOD/NEG/NEQ, NEWARR/IDX/STO
+- **Core 指令集 (0-99)**：B/E/IF/WH/FR/FN/RT/CL/PH, LIT/V/LET/SET, LT/GT/LE/GE/EQ, ADD/SUB/MUL/DIV/AND/OR/XOR/SHL/SHR, LEN/GET/PUT/SWP, DUP/DRP/ROT, IOW/IOR, GTWAY/WAIT/HALT/TRACE
+- **Extension 指令 (100-199)**：JMP/JZ/JNZ（svarint opcode index offset）, MOD/NEG/NEQ, NEWARR/IDX/STO, GC/BP/STEP（调试/控制）
 - **平台扩展 (200-239)**：ALLOC/FREE
 - **安全约束**：
   - Step limit（最大执行步数）
@@ -31,7 +31,7 @@ M-Language 由三层构成：
   - Stack limit（运行时栈大小限制）
   - 栈/局部/全局/PC 越界检查
 - **授权机制**：GTWAY 指令（授权后 IO 生效）
-- **字节码验证器**：静态验证 opcode/varint/B-E匹配/结构检查/locals访问
+- **字节码验证器（基础版）**：静态验证 opcode/varint/B-E 匹配/locals 访问（暂不覆盖平台扩展 200-239）
 - **调试工具**：反汇编、执行追踪、TRACE
 - **内存管理**：动态内存分配 (ALLOC/FREE) + GC 支持
 - **测试套件**：14+ 个示例程序
@@ -117,13 +117,12 @@ gcc -I include src/m_vm.c src/disasm.c src/validator.c src/main.c -o main
 | **栈操作** | `DUP` / `DRP` / `ROT` | 64-66 | 复制/丢弃/旋转 |
 | **硬件IO** | `IOW` / `IOR` | 70 / 71 | IO 写 / IO 读 |
 | **系统** | `GTWAY` / `WAIT` / `HALT` / `TRACE` | 80-83 | 授权/延时/停止/追踪 |
-| | `GC` / `BP` / `STEP` | 84-86 | GC/断点/单步 |
 
 ### Extension 指令 (100-199，可选)
 
 | 指令 | 值 | 作用 |
 | :-- | :-- | :-- |
-| `JMP` | 100 | 无条件跳转（svarint offset） |
+| `JMP` | 100 | 无条件跳转（svarint opcode index offset） |
 | `JZ` | 101 | 条件为零跳转 |
 | `JNZ` | 102 | 条件非零跳转 |
 | `MOD` | 110 | 取模（C 语义，符号与被除数一致） |
@@ -132,6 +131,7 @@ gcc -I include src/m_vm.c src/disasm.c src/validator.c src/main.c -o main
 | `NEQ` | 113 | 不等于 |
 | `NEWARR` | 120 | 创建数组 |
 | `IDX` / `STO` | 121-122 | 数组索引/存储 |
+| `GC` / `BP` / `STEP` | 130-132 | 调试/执行控制（位于 Extension 区间） |
 
 ### 平台扩展 (200-239)
 
@@ -194,11 +194,10 @@ if (!result.valid) {
 
 ### 验证检查项
 
-1. opcode 合法性（0-199 范围内）
+1. opcode 合法性（当前允许 0-255）
 2. varint 编码完整性
 3. B/E 块匹配
-4. IF/WH/FR 结构正确
-5. locals 访问不越界
+4. locals 访问不越界
 
 ---
 

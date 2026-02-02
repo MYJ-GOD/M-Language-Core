@@ -20,8 +20,8 @@ void m_validator_result_init(M_ValidatorResult* result) {
 }
 
 static bool is_valid_opcode(uint32_t op) {
-    /* Allow Core (0-99) and Extension (100-199) */
-    return op <= 199;
+    /* Allow Core + Extension + Platform + Experimental (0-255) per spec */
+    return op <= 255;
 }
 
 static bool has_handler(uint32_t op) {

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * M Language Virtual Machine - M-VM
  * 
  * Implements the M-Token specification with full varint encoding.
@@ -77,35 +77,13 @@ bool m_vm_decode_uvarint64(const uint8_t* code, int* pc, int len, uint64_t* out)
 }
 
 /* Decode a signed varint offset (for jump instructions).
- * Encoding rules:
- * - 1 byte: 0..127 (no continuation bit) for small non-negative offsets
- * - 2 bytes: signed 15-bit offset with continuation bit set on first byte
+ * Encoding rules: ZigZag + unsigned varint (per spec).
  */
-bool m_vm_decode_svarint(const uint8_t* code, int* pc, int len, int16_t* out) {
+bool m_vm_decode_svarint(const uint8_t* code, int* pc, int len, int32_t* out) {
     if (!code || !pc || !out) return false;
-    if (*pc + 1 > len) return false;
-
-    uint8_t b0 = code[*pc];
-
-    /* 1-byte encoding (0..127) */
-    if ((b0 & 0x80) == 0) {
-        *pc += 1;
-        *out = (int16_t)(b0 & 0x7F);
-        return true;
-    }
-
-    /* 2-byte encoding: signed 15-bit (range -16384..16383) */
-    if (*pc + 2 > len) return false;
-    uint8_t b1 = code[*pc + 1];
-    uint16_t raw15 = (uint16_t)(((uint16_t)b1 << 7) | (uint16_t)(b0 & 0x7F));
-
-    /* Sign-extend from bit 14 */
-    if (raw15 & 0x4000) {
-        raw15 |= 0x8000;
-    }
-
-    *pc += 2;
-    *out = (int16_t)raw15;
+    uint32_t u = 0;
+    if (!m_vm_decode_uvarint(code, pc, len, &u)) return false;
+    *out = m_vm_decode_zigzag(u);
     return true;
 }
 
@@ -113,6 +91,16 @@ int m_vm_encode_uvarint(uint32_t n, uint8_t* out) {
     int i = 0;
     while (n > 0x7F) {
         out[i++] = (uint8_t)(n & 0x7F) | 0x80;
+        n >>= 7;
+    }
+    out[i++] = (uint8_t)n;
+    return i;
+}
+
+int m_vm_encode_uvarint64(uint64_t n, uint8_t* out) {
+    int i = 0;
+    while (n > 0x7FULL) {
+        out[i++] = (uint8_t)(n & 0x7FULL) | 0x80;
         n >>= 7;
     }
     out[i++] = (uint8_t)n;
@@ -127,6 +115,114 @@ uint32_t m_vm_encode_zigzag(int32_t n) {
     return (uint32_t)((n << 1) ^ (n >> 31));
 }
 
+/* 64-bit ZigZag helpers (for i64 core type) */
+int64_t m_vm_decode_zigzag64(uint64_t n) {
+    return (int64_t)((n >> 1) ^ (uint64_t)-(int64_t)(n & 1));
+}
+
+uint64_t m_vm_encode_zigzag64(int64_t n) {
+    return (uint64_t)((n << 1) ^ (n >> 63));
+}
+
+/* =============================================
+ * Opcode Token Map (opcode index <-> byte offset)
+ * ============================================= */
+
+static bool skip_operands(const uint8_t* code, int len, uint32_t op, int* pc) {
+    if (!pc) return false;
+    switch (op) {
+        case M_LIT: {
+            uint64_t val = 0;
+            return m_vm_decode_uvarint64(code, pc, len, &val);
+        }
+        case M_V:
+        case M_LET:
+        case M_SET:
+        case M_GTWAY:
+        case M_WAIT:
+        case M_IOW:
+        case M_IOR:
+        case M_TRACE:
+        case M_BP: {
+            uint32_t val = 0;
+            return m_vm_decode_uvarint(code, pc, len, &val);
+        }
+        case M_CL: {
+            uint32_t func_id = 0;
+            uint32_t argc = 0;
+            return m_vm_decode_uvarint(code, pc, len, &func_id) &&
+                   m_vm_decode_uvarint(code, pc, len, &argc);
+        }
+        case M_FN: {
+            uint32_t arity = 0;
+            return m_vm_decode_uvarint(code, pc, len, &arity);
+        }
+        case M_JZ:
+        case M_JNZ:
+        case M_JMP:
+        case M_DWHL:
+        case M_WHIL: {
+            int32_t off = 0;
+            return m_vm_decode_svarint(code, pc, len, &off);
+        }
+        default:
+            return true;
+    }
+}
+
+static bool build_token_map(M_VM* v) {
+    if (!v || !v->code || v->code_len <= 0) return false;
+
+    int pc = 0;
+    int count = 0;
+    while (pc < v->code_len) {
+        uint32_t op = 0;
+        if (!m_vm_decode_uvarint(v->code, &pc, v->code_len, &op)) return false;
+        count++;
+        if (!skip_operands(v->code, v->code_len, op, &pc)) return false;
+    }
+
+    v->token_offsets = (int*)malloc((size_t)count * sizeof(int));
+    v->byte_to_token = (int*)malloc((size_t)v->code_len * sizeof(int));
+    if (!v->token_offsets || !v->byte_to_token) {
+        free(v->token_offsets);
+        free(v->byte_to_token);
+        v->token_offsets = NULL;
+        v->byte_to_token = NULL;
+        return false;
+    }
+
+    for (int i = 0; i < v->code_len; i++) {
+        v->byte_to_token[i] = -1;
+    }
+
+    pc = 0;
+    int idx = 0;
+    while (pc < v->code_len) {
+        v->token_offsets[idx] = pc;
+        v->byte_to_token[pc] = idx;
+
+        uint32_t op = 0;
+        if (!m_vm_decode_uvarint(v->code, &pc, v->code_len, &op)) {
+            free(v->token_offsets);
+            free(v->byte_to_token);
+            v->token_offsets = NULL;
+            v->byte_to_token = NULL;
+            return false;
+        }
+        if (!skip_operands(v->code, v->code_len, op, &pc)) {
+            free(v->token_offsets);
+            free(v->byte_to_token);
+            v->token_offsets = NULL;
+            v->byte_to_token = NULL;
+            return false;
+        }
+        idx++;
+    }
+
+    v->token_count = count;
+    return true;
+}
 /* =============================================
  * Helper Macros
  * ============================================= */
@@ -250,19 +346,10 @@ static void h_alloc(M_VM* v) {
      * Bytecode format: ALLOC, <size>
      */
     NEED(v, 1);
-    int32_t size = to_int(POP(v));
+    int64_t size = to_int(POP(v));
 
     if (size <= 0) { SET_FAULT(v, M_FAULT_BAD_ARG); return; }
     if (size > 1000000) { SET_FAULT(v, M_FAULT_BAD_ARG); return; }  /* Sanity limit */
-
-    /* Decode size parameter from bytecode and advance PC */
-    uint32_t enc_size = 0;
-    int pc = v->pc;
-    if (!m_vm_decode_uvarint(v->code, &pc, v->code_len, &enc_size)) {
-        SET_FAULT(v, M_FAULT_BAD_ENCODING);
-        return;
-    }
-    v->pc = pc;  /* IMPORTANT: advance PC past the parameter */
 
     void* ptr = malloc((size_t)size);
     if (!ptr) { SET_FAULT(v, M_FAULT_OOM); return; }
@@ -578,15 +665,15 @@ static void h_lit(M_VM* v) {
      * Uses zigzag decoding to support negative numbers
      */
     int pc = v->pc;
-    uint32_t enc = 0;
-    if (!m_vm_decode_uvarint(v->code, &pc, v->code_len, &enc)) {
+    uint64_t enc = 0;
+    if (!m_vm_decode_uvarint64(v->code, &pc, v->code_len, &enc)) {
         SET_FAULT(v, M_FAULT_BAD_ENCODING);
         return;
     }
     SPACE(v, 1);
     v->pc = pc;
     /* Use zigzag decode to support negative integers */
-    PUSH(v, make_int(m_vm_decode_zigzag(enc)));
+    PUSH(v, make_int(m_vm_decode_zigzag64(enc)));
 }
 
 static void h_v(M_VM* v) {
@@ -633,88 +720,88 @@ static void h_set(M_VM* v) {
 
 static void h_add(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a + b));
 }
 
 static void h_sub(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a - b));
 }
 
 static void h_mul(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a * b));
 }
 
 static void h_div(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
+    int64_t b = to_int(POP(v));
     if (b == 0) { SET_FAULT(v, M_FAULT_DIV_BY_ZERO); return; }
-    int32_t a = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a / b));
 }
 
 static void h_mod(M_VM* v) {
     /* Modulo: a,b -> a%b (C semantics: sign matches a) */
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
+    int64_t b = to_int(POP(v));
     if (b == 0) { SET_FAULT(v, M_FAULT_MOD_BY_ZERO); return; }
-    int32_t a = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a % b));
 }
 
 static void h_and(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a & b));
 }
 
 static void h_or(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a | b));
 }
 
 static void h_xor(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a ^ b));
 }
 
 static void h_shl(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v)) & 63;  /* Apply mask per spec: b & 63 */
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v)) & 63;  /* Apply mask per spec: b & 63 */
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a << b));
 }
 
 static void h_shr(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v)) & 63;  /* Apply mask per spec: b & 63 */
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v)) & 63;  /* Apply mask per spec: b & 63 */
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a >> b));
 }
 
 static void h_neg(M_VM* v) {
     /* Negate: a -> -a */
     NEED(v, 1);
-    int32_t a = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(-a));
 }
 
 static void h_not(M_VM* v) {
     /* Bitwise NOT: a -> ~a */
     NEED(v, 1);
-    int32_t a = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(~a));
 }
 
@@ -722,29 +809,29 @@ static void h_not(M_VM* v) {
 
 static void h_lt(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a < b ? 1 : 0));
 }
 
 static void h_gt(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a > b ? 1 : 0));
 }
 
 static void h_le(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a <= b ? 1 : 0));
 }
 
 static void h_ge(M_VM* v) {
     NEED(v, 2);
-    int32_t b = to_int(POP(v));
-    int32_t a = to_int(POP(v));
+    int64_t b = to_int(POP(v));
+    int64_t a = to_int(POP(v));
     PUSH(v, make_int(a >= b ? 1 : 0));
 }
 
@@ -752,7 +839,7 @@ static void h_eq(M_VM* v) {
     NEED(v, 2);
     M_Value b = POP(v);
     M_Value a = POP(v);
-    int32_t result = 0;
+    int64_t result = 0;
     if (a.type == b.type) {
         switch (a.type) {
             case M_TYPE_INT: result = (a.u.i == b.u.i) ? 1 : 0; break;
@@ -769,7 +856,7 @@ static void h_neq(M_VM* v) {
     NEED(v, 2);
     M_Value b = POP(v);
     M_Value a = POP(v);
-    int32_t result = 0;
+    int64_t result = 0;
     if (a.type == b.type) {
         switch (a.type) {
             case M_TYPE_INT: result = (a.u.i != b.u.i) ? 1 : 0; break;
@@ -801,7 +888,7 @@ static void h_len(M_VM* v) {
 static void h_newarr(M_VM* v) {
     /* NEWARR: <size> -> <array_ref> */
     NEED(v, 1);
-    int32_t size = to_int(POP(v));
+    int64_t size = to_int(POP(v));
     if (size < 0) { SET_FAULT(v, M_FAULT_BAD_ARG); return; }
     if (size > 1000000) { SET_FAULT(v, M_FAULT_BAD_ARG); return; }  /* Sanity limit */
 
@@ -814,7 +901,7 @@ static void h_newarr(M_VM* v) {
 
     arr->len = size;
     arr->cap = size;
-    for (int32_t i = 0; i < size; i++) {
+    for (int64_t i = 0; i < size; i++) {
         arr->data[i].type = M_TYPE_INT;
         arr->data[i].u.i = 0;
     }
@@ -841,7 +928,7 @@ static void h_newarr(M_VM* v) {
 static void h_idx(M_VM* v) {
     /* IDX: <array_ref>,<index> -> <element> */
     NEED(v, 2);
-    int32_t idx = to_int(POP(v));
+    int64_t idx = to_int(POP(v));
     M_Value arr = POP(v);
 
     if (arr.type != M_TYPE_ARRAY || arr.u.array_ptr == NULL) {
@@ -860,7 +947,7 @@ static void h_sto(M_VM* v) {
     /* STO: <array_ref>,<index>,<value> -> <array_ref> */
     NEED(v, 3);
     M_Value val = POP(v);
-    int32_t idx = to_int(POP(v));
+    int64_t idx = to_int(POP(v));
     M_Value arr = POP(v);
 
     if (arr.type != M_TYPE_ARRAY || arr.u.array_ptr == NULL) {
@@ -880,7 +967,7 @@ static void h_sto(M_VM* v) {
 
 static void h_get(M_VM* v) {
     NEED(v, 2);
-    int32_t idx = to_int(POP(v));
+    int64_t idx = to_int(POP(v));
     M_Value arr = POP(v);
 
     if (arr.type != M_TYPE_ARRAY || arr.u.array_ptr == NULL) {
@@ -897,7 +984,7 @@ static void h_get(M_VM* v) {
 static void h_put(M_VM* v) {
     NEED(v, 3);
     M_Value val = POP(v);
-    int32_t idx = to_int(POP(v));
+    int64_t idx = to_int(POP(v));
     M_Value arr = POP(v);
 
     if (arr.type != M_TYPE_ARRAY || arr.u.array_ptr == NULL) {
@@ -1030,7 +1117,7 @@ static void h_fr(M_VM* v) {
      * Full runtime support requires the compiler to insert jumps.
      */
     NEED(v, 1);
-    int32_t cond = to_int(POP(v));
+    int64_t cond = to_int(POP(v));
 
     /* Skip FR opcode */
     int pc = v->pc;
@@ -1065,12 +1152,12 @@ static void h_fr(M_VM* v) {
 static void h_jz(M_VM* v) {
     /* Jump if zero: <cond>,JZ,<offset>
      * Jump to offset if condition is false (zero).
-     * Offset is signed varint encoded (relative to current PC).
+     * Offset is signed varint encoded (opcode index units, relative to next opcode).
      */
     NEED(v, 1);
-    int32_t cond = to_int(POP(v));
+    int64_t cond = to_int(POP(v));
     int pc = v->pc;
-    int16_t offset = 0;
+    int32_t offset = 0;
     
     if (!m_vm_decode_svarint(v->code, &pc, v->code_len, &offset)) {
         SET_FAULT(v, M_FAULT_BAD_ENCODING);
@@ -1079,21 +1166,26 @@ static void h_jz(M_VM* v) {
     v->pc = pc;
     
     if (cond == 0) {
-        int target = v->pc + offset;
-        CHECK_PC(v, target);
-        v->pc = target;
+        int base = v->last_op_index + 1;
+        int target_index = base + offset;
+        if (!v->token_offsets || v->last_op_index < 0 ||
+            target_index < 0 || target_index >= v->token_count) {
+            SET_FAULT(v, M_FAULT_PC_OOB);
+            return;
+        }
+        v->pc = v->token_offsets[target_index];
     }
 }
 
 static void h_jnz(M_VM* v) {
     /* Jump if not zero: <cond>,JNZ,<offset>
      * Jump to offset if condition is true (non-zero).
-     * Offset is signed varint encoded (relative to current PC).
+     * Offset is signed varint encoded (opcode index units, relative to next opcode).
      */
     NEED(v, 1);
-    int32_t cond = to_int(POP(v));
+    int64_t cond = to_int(POP(v));
     int pc = v->pc;
-    int16_t offset = 0;
+    int32_t offset = 0;
     
     if (!m_vm_decode_svarint(v->code, &pc, v->code_len, &offset)) {
         SET_FAULT(v, M_FAULT_BAD_ENCODING);
@@ -1102,9 +1194,14 @@ static void h_jnz(M_VM* v) {
     v->pc = pc;
     
     if (cond != 0) {
-        int target = v->pc + offset;
-        CHECK_PC(v, target);
-        v->pc = target;
+        int base = v->last_op_index + 1;
+        int target_index = base + offset;
+        if (!v->token_offsets || v->last_op_index < 0 ||
+            target_index < 0 || target_index >= v->token_count) {
+            SET_FAULT(v, M_FAULT_PC_OOB);
+            return;
+        }
+        v->pc = v->token_offsets[target_index];
     }
 }
 
@@ -1117,12 +1214,12 @@ static void h_dwhl(M_VM* v) {
     /* DO-WHILE loop: jump back to DO if condition is true
      * Format: DO,<body>,DWHL,<offset>
      * When we reach DWHL, we pop the condition and jump back if true.
-     * The offset is signed varint encoded (relative to current PC).
+     * The offset is signed varint encoded (opcode index units, relative to next opcode).
      */
     NEED(v, 1);
-    int32_t cond = to_int(POP(v));
+    int64_t cond = to_int(POP(v));
     int pc = v->pc;
-    int16_t offset = 0;
+    int32_t offset = 0;
     
     if (!m_vm_decode_svarint(v->code, &pc, v->code_len, &offset)) {
         SET_FAULT(v, M_FAULT_BAD_ENCODING);
@@ -1131,10 +1228,15 @@ static void h_dwhl(M_VM* v) {
     v->pc = pc;
     
     if (cond != 0) {
-        /* Jump back to DO (relative offset from current PC) */
-        int target = v->pc + offset;
-        CHECK_PC(v, target);
-        v->pc = target;
+        /* Jump back to DO (opcode index units) */
+        int base = v->last_op_index + 1;
+        int target_index = base + offset;
+        if (!v->token_offsets || v->last_op_index < 0 ||
+            target_index < 0 || target_index >= v->token_count) {
+            SET_FAULT(v, M_FAULT_PC_OOB);
+            return;
+        }
+        v->pc = v->token_offsets[target_index];
     }
 }
 
@@ -1142,13 +1244,13 @@ static void h_whil(M_VM* v) {
     /* WHILE loop: check condition, jump to body if true
      * Format: <condition>, WHILE,<offset>
      * The condition should be on top of the stack.
-     * If cond is false (zero), jump to loop end (relative offset from current PC).
+     * If cond is false (zero), jump to loop end (opcode index units, relative to next opcode).
      * If cond is true, fall through to body.
      */
     NEED(v, 1);
-    int32_t cond = to_int(POP(v));
+    int64_t cond = to_int(POP(v));
     int pc = v->pc;
-    int16_t offset = 0;
+    int32_t offset = 0;
     
     if (!m_vm_decode_svarint(v->code, &pc, v->code_len, &offset)) {
         SET_FAULT(v, M_FAULT_BAD_ENCODING);
@@ -1157,26 +1259,38 @@ static void h_whil(M_VM* v) {
     v->pc = pc;
     
     if (cond == 0) {
-        /* Condition false, jump to loop end (relative offset from current PC) */
-        int target = v->pc + offset;
-        CHECK_PC(v, target);
-        v->pc = target;
+        /* Condition false, jump to loop end (opcode index units) */
+        int base = v->last_op_index + 1;
+        int target_index = base + offset;
+        if (!v->token_offsets || v->last_op_index < 0 ||
+            target_index < 0 || target_index >= v->token_count) {
+            SET_FAULT(v, M_FAULT_PC_OOB);
+            return;
+        }
+        v->pc = v->token_offsets[target_index];
     }
 }
 
 static void h_jmp(M_VM* v) {
     /* Unconditional jump: JMP,<offset> */
     int pc = v->pc;
-    int16_t offset = 0;
+    int32_t offset = 0;
     
     if (!m_vm_decode_svarint(v->code, &pc, v->code_len, &offset)) {
         SET_FAULT(v, M_FAULT_BAD_ENCODING);
         return;
     }
     v->pc = pc;
-    int target = v->pc + offset;
-    CHECK_PC(v, target);
-    v->pc = target;
+    {
+        int base = v->last_op_index + 1;
+        int target_index = base + offset;
+        if (!v->token_offsets || v->last_op_index < 0 ||
+            target_index < 0 || target_index >= v->token_count) {
+            SET_FAULT(v, M_FAULT_PC_OOB);
+            return;
+        }
+        v->pc = v->token_offsets[target_index];
+    }
 }
 
 static void h_rt(M_VM* v) {
@@ -1409,6 +1523,8 @@ static const uint32_t GAS_COST[256] = {
     [M_GC]     = 10,    /* GC costs more (scans all memory) */
     [M_BP]     = 1,
     [M_STEP]   = 0,
+    [M_ALLOC]  = 5,     /* Platform extension */
+    [M_FREE]   = 2,
     /* Extension instructions (100-199) */
     [M_JZ]     = 1,
     [M_JNZ]    = 1,     /* Jump if not zero */
@@ -1482,6 +1598,8 @@ static const handler TABLE[256] = {
     [M_GC]     = h_gc,
     [M_BP]     = h_bp,
     [M_STEP]   = h_step,
+    [M_ALLOC]  = h_alloc,
+    [M_FREE]   = h_free,
     /* Extension instructions (100-199) */
     [M_JZ]     = h_jz,
     [M_JNZ]    = h_jnz,   /* Jump if not zero (now implemented) */
@@ -1524,6 +1642,14 @@ void m_vm_init(M_VM* vm, uint8_t* code, int len,
     vm->alloc_head = NULL;
     vm->gc_enabled = false;
     vm->gc_threshold = 100;
+    vm->last_op_index = -1;
+    vm->token_offsets = NULL;
+    vm->token_count = 0;
+    vm->byte_to_token = NULL;
+
+    if (!build_token_map(vm)) {
+        vm->fault = M_FAULT_BAD_ENCODING;
+    }
 }
 
 void m_vm_set_step_limit(M_VM* vm, uint64_t limit) { 
@@ -1555,7 +1681,12 @@ void m_vm_reset(M_VM* vm) {
     void (*trace)(uint32_t, const char*) = vm->trace;
     uint64_t step_limit = vm->step_limit;
     uint64_t gas_limit = vm->gas_limit;
+    int call_depth_limit = vm->call_depth_limit;
+    int stack_limit = vm->stack_limit;
     AllocNode* alloc_head = vm->alloc_head;  /* Keep allocations across reset */
+    int* token_offsets = vm->token_offsets;
+    int token_count = vm->token_count;
+    int* byte_to_token = vm->byte_to_token;
 
     memset(vm, 0, sizeof(M_VM));
     vm->code = code;
@@ -1570,9 +1701,16 @@ void m_vm_reset(M_VM* vm) {
     vm->step_limit = step_limit;
     vm->gas = 0;
     vm->gas_limit = gas_limit;
+    vm->call_depth = 0;
+    vm->call_depth_limit = call_depth_limit;
+    vm->stack_limit = stack_limit > 0 ? stack_limit : STACK_SIZE;
     vm->local_count = 0;
     vm->frame_sp = -1;
     vm->alloc_head = alloc_head;
+    vm->last_op_index = -1;
+    vm->token_offsets = token_offsets;
+    vm->token_count = token_count;
+    vm->byte_to_token = byte_to_token;
 
     vm->io_write = io_w;
     vm->io_read = io_r;
@@ -1603,6 +1741,15 @@ int m_vm_step(M_VM* vm) {
     }
 
     /* Fetch instruction (always varint) */
+    if (vm->byte_to_token) {
+        vm->last_op_index = (vm->pc >= 0 && vm->pc < vm->code_len) ? vm->byte_to_token[vm->pc] : -1;
+        if (vm->last_op_index < 0) {
+            SET_FAULT(vm, M_FAULT_BAD_ENCODING);
+            return -(int)vm->fault;
+        }
+    } else {
+        vm->last_op_index = -1;
+    }
     uint32_t op = 0;
     int pc = vm->pc;
     if (!m_vm_decode_uvarint(vm->code, &pc, vm->code_len, &op)) {
@@ -1728,7 +1875,7 @@ int m_vm_call(M_VM* vm, uint32_t func_id, int argc, M_Value* args) {
     vm->ret_stack[++vm->rp] = vm->code_len;  /* Return to end */
 
     /* Jump to function */
-    if (func_id < 0 || func_id >= vm->code_len) {
+    if (func_id >= (uint32_t)vm->code_len) {
         SET_FAULT(vm, M_FAULT_PC_OOB);
         return -1;
     }
@@ -1781,6 +1928,9 @@ const char* m_vm_fault_string(M_Fault fault) {
         case M_FAULT_BAD_ARG:             return "BAD_ARG";
         case M_FAULT_OOM:                 return "OOM";
         case M_FAULT_ASSERT_FAILED:       return "ASSERT_FAILED";
+        case M_FAULT_BREAKPOINT:          return "BREAKPOINT";
+        case M_FAULT_DEBUG_STEP:          return "DEBUG_STEP";
+        case M_FAULT_CALL_DEPTH_LIMIT:    return "CALL_DEPTH_LIMIT";
         default:                          return "UNKNOWN";
     }
 }
@@ -1897,4 +2047,14 @@ void m_vm_destroy(M_VM* vm) {
         curr = next;
     }
     vm->alloc_head = NULL;
+    if (vm->token_offsets) {
+        free(vm->token_offsets);
+        vm->token_offsets = NULL;
+    }
+    if (vm->byte_to_token) {
+        free(vm->byte_to_token);
+        vm->byte_to_token = NULL;
+    }
+    vm->token_count = 0;
 }
+

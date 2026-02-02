@@ -22,22 +22,22 @@
 #define M_B    10   /* Block begin */
 #define M_E    11   /* Block end */
 #define M_IF   12   /* Conditional: <cond>,IF,B,<then>,E,B,<else>,E */
-#define M_WH   13   /* While loop: <cond>,WH,B<body>,E (Core - now implemented) */
-#define M_FR   14   /* For loop: <init>,<cond>,<inc>,FR,B<body>,E (Extension - not yet fully implemented) */
+#define M_WH   13   /* While loop: <cond>,WH,B<body>,E (Core) */
+#define M_FR   14   /* For loop: <init>,<cond>,<inc>,FR,B<body>,E (Extension) */
 #define M_RT   16   /* Return: RT,<value> */
 #define M_CL   17   /* Call: CL,<func_id>,<argc>,<arg0>..<argN> */
 #define M_PH   18   /* Placeholder (for alignment/padding) */
 
 /* --- Extension Control Flow (100-199, not frozen) --- */
 /* JZ, JMP, JNZ are Extension instructions for lowering structured control flow */
-#define M_JZ   101  /* Jump if zero: <cond>,JZ,<target_addr> (Extension) */
-#define M_JMP  100  /* Unconditional jump: JMP,<target_addr> (Extension) */
-#define M_JNZ  102  /* Jump if not zero: <cond>,JNZ,<target_addr> (Extension - now implemented) */
+#define M_JZ   101  /* Jump if zero: <cond>,JZ,<svarint offset> (Extension) */
+#define M_JMP  100  /* Unconditional jump: JMP,<svarint offset> (Extension) */
+#define M_JNZ  102  /* Jump if not zero: <cond>,JNZ,<svarint offset> (Extension) */
 
 /* --- Extension Loop Constructs (NOT ABI - for lowering only) --- */
-#define M_DO    140 /* Do-while loop begin: DO,<body>,WHILE,<cond> (Extension - NOT ABI, for compiler lowering) */
+#define M_DO    140 /* Do-while loop begin: DO,<body>,WHILE,<cond> (Extension - NOT ABI) */
 #define M_DWHL  141 /* Do-while loop end (jump back if cond true) (Extension - NOT ABI) */
-#define M_WHIL  142 /* While loop: <cond>,WHILE,<offset> (Extension - NOT ABI, use Core WH instead) */
+#define M_WHIL  142 /* While loop: <cond>,WHILE,<offset> (Extension - NOT ABI, use Core WH) */
 
 /* --- Data Operations (30-39) --- */
 #define M_LIT  30   /* Literal: LIT,<varint|dict_id> */
@@ -52,18 +52,29 @@
 #define M_GE   43   /* Greater than or equal */
 #define M_EQ   44   /* Equal */
 
+/* --- Arithmetic / Bitwise (50-58, Core) --- */
+#define M_ADD  50   /* Addition: a,b -> a+b */
+#define M_SUB  51   /* Subtraction: a,b -> a-b */
+#define M_MUL  52   /* Multiplication: a,b -> a*b */
+#define M_DIV  53   /* Division: a,b -> a/b */
+#define M_AND  54   /* Bitwise AND: a,b -> a&b */
+#define M_OR   55   /* Bitwise OR: a,b -> a|b */
+#define M_XOR  56   /* Bitwise XOR: a,b -> a^b */
+#define M_SHL  57   /* Shift left: a,b -> a<<b */
+#define M_SHR  58   /* Shift right: a,b -> a>>b */
+
 /* --- Arithmetic Extension (110-119) --- */
 #define M_MOD  110  /* Modulo: a,b -> a%b (Extension - C semantics, sign matches a) */
-#define M_NEG  111  /* Negate: a -> -a (Extension - now implemented) */
-#define M_NOT  112  /* Bitwise NOT: a -> ~a (Extension - now implemented) */
-#define M_NEQ  113  /* Not equal: a,b -> (a!=b) (Extension - was 45) */
+#define M_NEG  111  /* Negate: a -> -a (Extension) */
+#define M_NOT  112  /* Bitwise NOT: a -> ~a (Extension) */
+#define M_NEQ  113  /* Not equal: a,b -> (a!=b) (Extension) */
 
 /* --- Array Operations (60-63) --- */
 /* Note: These follow the M-Token specification exactly */
 #define M_LEN    60   /* Array length: <array_ref> -> <length> */
-#define M_GET    61   /* Array get: <array_ref>,<index> -> <element> (规范定义) */
-#define M_PUT    62   /* Array put: <array_ref>,<index>,<value> -> <array_ref> (规范定义) */
-#define M_SWP    63   /* Swap: a,b -> b,a (规范定义 - 数组/栈操作) */
+#define M_GET    61   /* Array get: <array_ref>,<index> -> <element> */
+#define M_PUT    62   /* Array put: <array_ref>,<index>,<value> -> <array_ref> */
+#define M_SWP    63   /* Swap: a,b -> b,a */
 
 /* --- Stack Operations (64-66) --- */
 #define M_DUP  64   /* Duplicate top: a -> a,a */
@@ -77,7 +88,7 @@
 #define M_SWP_ALIAS  69   /* DEPRECATED: Use M_SWP=63 */
 
 /* --- Legacy Array Operations (120-122) --- */
-/* For backward compatibility - renamed to avoid confusion with规范 numbers */
+/* For backward compatibility */
 #define M_NEWARR 120  /* Array create: <size> -> <array_ref> (Extension) */
 #define M_IDX    121  /* Array index: <array_ref>,<index> -> <element> (Extension) */
 #define M_STO    122  /* Array store: <array_ref>,<index>,<value> -> <array_ref> (Extension) */
@@ -95,9 +106,9 @@
 #define M_WAIT  81  /* Wait/Delay: WAIT,<milliseconds> */
 #define M_HALT  82  /* Halt execution */
 #define M_TRACE 83  /* Trace/Debug: TRACE,<level> */
-#define M_GC    84  /* Manual GC trigger: GC */
-#define M_BP    85  /* Breakpoint: BP,<id> */
-#define M_STEP  86  /* Single step: STEP */
+#define M_GC    130 /* Manual GC trigger: GC (Extension) */
+#define M_BP    131 /* Breakpoint: BP,<id> (Extension) */
+#define M_STEP  132 /* Single step: STEP (Extension) */
 
 /* --- VM Configuration --- */
 #define STACK_SIZE     256
@@ -152,7 +163,7 @@ typedef struct {
     uint64_t step;
     int      pc;
     uint32_t op;        /* Full varint opcode */
-    int32_t  stack_top;
+    int64_t  stack_top;
     int      sp;
 } M_TraceEntry;
 
@@ -162,7 +173,7 @@ typedef struct {
     bool     halted;
     M_Fault  fault;
     uint64_t steps;
-    int32_t  result;
+    int64_t  result;
     int      sp;
     M_TraceEntry trace[MAX_TRACE];
     int      trace_len;
@@ -255,6 +266,12 @@ typedef struct M_VM {
     /* Fault tracking */
     M_Fault  fault;
     uint32_t last_op;
+    int      last_op_index;
+
+    /* Opcode token index map (for jump offsets in opcode units) */
+    int*     token_offsets;   /* opcode index -> byte offset */
+    int      token_count;
+    int*     byte_to_token;   /* byte offset -> opcode index (or -1) */
 
     /* External hooks */
     void (*io_write)(uint8_t device_id, M_Value value);
@@ -269,13 +286,18 @@ typedef struct M_VM {
 
 bool m_vm_decode_uvarint(const uint8_t* code, int* pc, int len, uint32_t* out);
 bool m_vm_decode_uvarint64(const uint8_t* code, int* pc, int len, uint64_t* out);
-bool m_vm_decode_svarint(const uint8_t* code, int* pc, int len, int16_t* out);
+bool m_vm_decode_svarint(const uint8_t* code, int* pc, int len, int32_t* out);
 
 int m_vm_encode_uvarint(uint32_t n, uint8_t* out);
+int m_vm_encode_uvarint64(uint64_t n, uint8_t* out);
 
 int32_t m_vm_decode_zigzag(uint32_t n);
 
 uint32_t m_vm_encode_zigzag(int32_t n);
+
+int64_t m_vm_decode_zigzag64(uint64_t n);
+
+uint64_t m_vm_encode_zigzag64(int64_t n);
 
 /* =============================================
  * Core Interface

@@ -1,10 +1,10 @@
-/**
+﻿/**
  * M Language Virtual Machine - Test Suite (M-Token Edition)
  * 
- * 测试新的 M-Token 规范:
- * - 全 varint 编码
- * - 结构化控制流 (FN, IF, B, E)
- * - 高级操作 (数组、位运算)
+ * Tests new M-Token specification:
+ * - Full varint encoding
+ * - Structured control flow (FN, IF, B, E)
+ * - Advanced operations (arrays, bitwise)
  */
 
 #include <stdio.h>
@@ -19,7 +19,7 @@
  * ============================================= */
 
 static void io_write(uint8_t device_id, M_Value value) {
-    printf("[IOW] dev=%u val=%d\n", (unsigned)device_id, (int)value.u.i);
+    printf("[IOW] dev=%u val=%lld\n", (unsigned)device_id, (long long)value.u.i);
 }
 
 static M_Value io_read(uint8_t device_id) {
@@ -42,70 +42,67 @@ static void trace_fn(uint32_t level, const char* msg) {
 typedef struct {
     uint8_t buf[512];
     int len;
+    int op_count;
 } ByteBuf;
 
-static void emit_uvar(ByteBuf* b, uint32_t u) {
-    b->len += m_vm_encode_uvarint(u, &b->buf[b->len]);
+static void emit_uvar(ByteBuf* b, uint64_t u) {
+    b->len += m_vm_encode_uvarint64(u, &b->buf[b->len]);
 }
 
 static void emit_svar(ByteBuf* b, int32_t s) {
     emit_uvar(b, m_vm_encode_zigzag(s));
 }
 
-static void emit_op(ByteBuf* b, uint32_t op) {
+static int emit_op(ByteBuf* b, uint32_t op) {
     emit_uvar(b, op);  /* All opcodes are varint */
+    return b->op_count++;
+}
+
+static void emit_lit(ByteBuf* b, int64_t v) {
+    emit_op(b, M_LIT);
+    emit_uvar(b, m_vm_encode_zigzag64(v));
 }
 
 /* =============================================
- * Signed Offset Encoding (15-bit)
+ * Signed Offset Encoding (ZigZag + Varint)
  * ============================================= */
 
-/* Encode a signed 15-bit offset.
- * 1 byte: 0..127 (no continuation bit)
- * 2 bytes: signed range -16384..16383 with continuation bit set
- */
-static int encode_svar15(int32_t value, uint8_t out[2]) {
-    if (value >= 0 && value <= 0x7F) {
-        out[0] = (uint8_t)value;
-        return 1;
-    }
+#define SVAR_PLACEHOLDER_LEN 5
 
-    if (value < -16384 || value > 16383) {
-        /* Out of range for 15-bit signed encoding */
-        return 0;
-    }
-
-    uint16_t raw15 = (uint16_t)value & 0x7FFF;
-    out[0] = (uint8_t)((raw15 & 0x7F) | 0x80);
-    out[1] = (uint8_t)((raw15 >> 7) & 0xFF);
-    return 2;
-}
-
-/* Emit a fixed 2-byte placeholder for a signed offset */
+/* Emit a fixed placeholder for a signed offset (max 5 bytes) */
 static int emit_svar_placeholder(ByteBuf* b) {
     int pos = b->len;
-    b->buf[b->len++] = 0x80; /* continuation bit set */
-    b->buf[b->len++] = 0x00; /* placeholder */
+    for (int i = 0; i < SVAR_PLACEHOLDER_LEN - 1; i++) {
+        b->buf[b->len++] = 0x80;
+    }
+    b->buf[b->len++] = 0x00;
     return pos;
 }
 
-/* Backpatch a signed 15-bit offset at a given position (2 bytes). */
-static void backpatch_svar15(ByteBuf* b, int pos, int32_t value) {
-    uint8_t tmp[2] = {0};
-    int len = encode_svar15(value, tmp);
-    if (len == 1) {
-        /* Force 2-byte encoding to keep layout stable */
-        tmp[1] = 0x00;
-        tmp[0] = (uint8_t)(tmp[0] | 0x80);
-        len = 2;
+/* Backpatch a signed varint offset at a given position (resizes buffer if needed). */
+static void backpatch_svar(ByteBuf* b, int pos, int32_t value) {
+    uint8_t tmp[5] = {0};
+    uint32_t enc = m_vm_encode_zigzag(value);
+    int new_len = m_vm_encode_uvarint(enc, tmp);
+    int old_len = SVAR_PLACEHOLDER_LEN;
+    int delta = new_len - old_len;
+
+    if (delta > 0) {
+        if (b->len + delta >= (int)sizeof(b->buf)) {
+            return;
+        }
+        memmove(&b->buf[pos + new_len],
+                &b->buf[pos + old_len],
+                (size_t)(b->len - (pos + old_len)));
+        b->len += delta;
+    } else if (delta < 0) {
+        memmove(&b->buf[pos + new_len],
+                &b->buf[pos + old_len],
+                (size_t)(b->len - (pos + old_len)));
+        b->len += delta;
     }
-    if (len != 2) {
-        /* If out of range, clamp to avoid corrupting bytecode */
-        tmp[0] = 0x80;
-        tmp[1] = 0x00;
-    }
-    b->buf[pos] = tmp[0];
-    b->buf[pos + 1] = tmp[1];
+
+    memcpy(&b->buf[pos], tmp, (size_t)new_len);
 }
 
 /* =============================================
@@ -115,9 +112,9 @@ static void backpatch_svar15(ByteBuf* b, int pos, int32_t value) {
 /* Program 1: Simple arithmetic - 5 + 3 * 2 = 11 */
 static ByteBuf build_arithmetic_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);      /* LIT 5 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 3);      /* LIT 3 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 2);      /* LIT 2 */
+    emit_lit(&b, 5);      /* LIT 5 */
+    emit_lit(&b, 3);      /* LIT 3 */
+    emit_lit(&b, 2);      /* LIT 2 */
     emit_op(&b, M_MUL);                          /* 3 * 2 = 6 */
     emit_op(&b, M_ADD);                          /* 5 + 6 = 11 */
     emit_op(&b, M_HALT);
@@ -127,8 +124,8 @@ static ByteBuf build_arithmetic_demo(void) {
 /* Program 2: Comparison - 10 > 5 ? 1 : 0 */
 static ByteBuf build_comparison_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
-    emit_op(&b, M_LIT);  emit_uvar(&b, 10);     /* LIT 10 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);      /* LIT 5 */
+    emit_lit(&b, 10);     /* LIT 10 */
+    emit_lit(&b, 5);      /* LIT 5 */
     emit_op(&b, M_GT);                           /* 10 > 5 = true */
     emit_op(&b, M_HALT);
     return b;
@@ -137,9 +134,9 @@ static ByteBuf build_comparison_demo(void) {
 /* Program 3: Variables - let x = 10; let y = x + 5; result = y */
 static ByteBuf build_variables_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
-    emit_op(&b, M_LIT);  emit_uvar(&b, 10);     /* LIT 10 */
+    emit_lit(&b, 10);     /* LIT 10 */
     emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* LET 0 (x=10) */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);      /* LIT 5 */
+    emit_lit(&b, 5);      /* LIT 5 */
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* V 0 (x) */
     emit_op(&b, M_ADD);                          /* x + 5 = 15 */
     emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* LET 1 (y=15) */
@@ -187,12 +184,12 @@ static ByteBuf build_nested_function_demo(void) {
     
     /* === Main program === */
     /* double(5) */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);      /* arg0 = 5 */
+    emit_lit(&b, 5);      /* arg0 = 5 */
     emit_op(&b, M_CL);  emit_uvar(&b, fn_double); /* CL to double */
     emit_uvar(&b, 1);                            /* argc = 1 */
     
     /* double(3) */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 3);      /* arg0 = 3 */
+    emit_lit(&b, 3);      /* arg0 = 3 */
     emit_op(&b, M_CL);  emit_uvar(&b, fn_double); /* CL to double */
     emit_uvar(&b, 1);                            /* argc = 1 */
     
@@ -208,51 +205,54 @@ static ByteBuf build_loop_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
     
     /* i = 5, sum = 0 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
+    emit_lit(&b, 5);
     emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* x = 5 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 0);
+    emit_lit(&b, 0);
     emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* sum = 0 */
     
     /* L_cond: check x > 0 */
-    int cond_start = b.len;
+    int cond_start = b.op_count;
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* x */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* 0 */
+    emit_lit(&b, 0);      /* 0 */
     emit_op(&b, M_GT);                           /* x > 0 */
     
-    /* Emit JZ with 2-byte signed offset placeholder */
-    emit_op(&b, M_JZ);
+    /* Emit JZ with signed varint offset placeholder */
+    int jz_op_index = emit_op(&b, M_JZ);
     int jz_offset_pos = emit_svar_placeholder(&b);
     
     /* L_body: sum += x; x-- */
-    int body_start = b.len;
     emit_op(&b, M_V);    emit_uvar(&b, 1);      /* sum */
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* x */
     emit_op(&b, M_ADD);                          /* sum + x */
     emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* sum = result */
     
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* x */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* 1 */
+    emit_lit(&b, 1);      /* 1 */
     emit_op(&b, M_SUB);                          /* x - 1 */
     emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* x = result */
     
-    /* Emit JMP with 2-byte signed offset placeholder */
-    emit_op(&b, M_JMP);
+    /* Emit JMP with signed varint offset placeholder */
+    int jmp_op_index = emit_op(&b, M_JMP);
     int jmp_offset_pos = emit_svar_placeholder(&b);
     
     /* L_end: output result */
-    int loop_end = b.len;
+    int loop_end = b.op_count;
     emit_op(&b, M_V);    emit_uvar(&b, 1);      /* sum */
     emit_op(&b, M_HALT);
     
     /* Backpatch JZ offset: from after JZ arg to loop_end */
-    int jz_after_arg = jz_offset_pos + 2;
-    int jz_offset = loop_end - jz_after_arg;
-    backpatch_svar15(&b, jz_offset_pos, jz_offset);
+    int jz_offset = loop_end - (jz_op_index + 1);
     
     /* Backpatch JMP offset: from after JMP arg to cond_start */
-    int jmp_after_arg = jmp_offset_pos + 2;
-    int jmp_offset = cond_start - jmp_after_arg;
-    backpatch_svar15(&b, jmp_offset_pos, jmp_offset);
+    int jmp_offset = cond_start - (jmp_op_index + 1);
+
+    if (jmp_offset_pos > jz_offset_pos) {
+        backpatch_svar(&b, jmp_offset_pos, jmp_offset);
+        backpatch_svar(&b, jz_offset_pos, jz_offset);
+    } else {
+        backpatch_svar(&b, jz_offset_pos, jz_offset);
+        backpatch_svar(&b, jmp_offset_pos, jmp_offset);
+    }
     
     return b;
 }
@@ -349,13 +349,13 @@ static ByteBuf build_do_while_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
     
     /* sum = 0, i = 5 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 0);
+    emit_lit(&b, 0);
     emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = 0 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
+    emit_lit(&b, 5);
     emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* i = 5 */
     
     /* DO loop start */
-    int do_start = b.len;
+    int do_start = b.op_count;
     emit_op(&b, M_DO);                           /* DO marker */
     
     /* Loop body: sum += i, i-- */
@@ -365,17 +365,17 @@ static ByteBuf build_do_while_demo(void) {
     emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = result */
     
     emit_op(&b, M_V);    emit_uvar(&b, 1);      /* i */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* 1 */
+    emit_lit(&b, 1);      /* 1 */
     emit_op(&b, M_SUB);                          /* i - 1 */
     emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* i = result */
     
     /* Condition: i > 0 */
     emit_op(&b, M_V);    emit_uvar(&b, 1);      /* i */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* 0 */
+    emit_lit(&b, 0);      /* 0 */
     emit_op(&b, M_GT);                           /* i > 0 */
     
     /* DWHL: if cond != 0, jump back to DO */
-    emit_op(&b, M_DWHL);
+    int dwhl_op_index = emit_op(&b, M_DWHL);
     int dwhl_offset_pos = emit_svar_placeholder(&b);
     
     /* Return sum */
@@ -383,8 +383,8 @@ static ByteBuf build_do_while_demo(void) {
     emit_op(&b, M_HALT);
     
     /* Backpatch DWHL offset: relative from after DWHL arg to do_start */
-    int dwhl_offset = do_start - (dwhl_offset_pos + 2);
-    backpatch_svar15(&b, dwhl_offset_pos, dwhl_offset);
+    int dwhl_offset = do_start - (dwhl_op_index + 1);
+    backpatch_svar(&b, dwhl_offset_pos, dwhl_offset);
     
     return b;
 }
@@ -397,25 +397,24 @@ static ByteBuf build_while_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
     
     /* sum = 0, i = 5 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 0);
+    emit_lit(&b, 0);
     emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = 0 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
+    emit_lit(&b, 5);
     emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* i = 5 */
     
     /* Condition check position */
-    int cond_start = b.len;
+    int cond_start = b.op_count;
     
     /* Condition: i > 0 */
     emit_op(&b, M_V);    emit_uvar(&b, 1);      /* i */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* 0 */
+    emit_lit(&b, 0);      /* 0 */
     emit_op(&b, M_GT);                           /* i > 0 */
     
-    /* Emit WHILE with 2-byte signed offset placeholder */
-    emit_op(&b, M_WHIL);
+    /* Emit WHILE with signed varint offset placeholder */
+    int while_op_index = emit_op(&b, M_WHIL);
     int while_offset_pos = emit_svar_placeholder(&b);
     
     /* Body starts here */
-    int body_start = b.len;
     
     /* Body: sum = sum + i */
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
@@ -425,16 +424,16 @@ static ByteBuf build_while_demo(void) {
     
     /* i = i - 1 */
     emit_op(&b, M_V);    emit_uvar(&b, 1);      /* i */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* 1 */
+    emit_lit(&b, 1);      /* 1 */
     emit_op(&b, M_SUB);                          /* i - 1 */
     emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* i = result */
     
     /* Jump back to condition check */
-    emit_op(&b, M_JMP);
+    int jmp_op_index = emit_op(&b, M_JMP);
     int jmp_offset_pos = emit_svar_placeholder(&b);
     
     /* Exit point */
-    int loop_exit = b.len;
+    int loop_exit = b.op_count;
     
     /* Output sum */
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
@@ -442,13 +441,19 @@ static ByteBuf build_while_demo(void) {
     
     /* Backpatch WHILE offset: relative from after WHILE arg to loop_exit */
     /* If cond == 0, WHILE jumps to loop_exit; otherwise fallthrough to body */
-    int while_offset = loop_exit - (while_offset_pos + 2);
-    backpatch_svar15(&b, while_offset_pos, while_offset);
+    int while_offset = loop_exit - (while_op_index + 1);
     
     /* Backpatch JMP offset: relative from after JMP arg to cond_start */
     /* After JMP arg, PC will be at (jmp_offset_pos + 2), so target should be cond_start - (jmp_offset_pos + 2) */
-    int jmp_offset = cond_start - (jmp_offset_pos + 2);
-    backpatch_svar15(&b, jmp_offset_pos, jmp_offset);
+    int jmp_offset = cond_start - (jmp_op_index + 1);
+
+    if (jmp_offset_pos > while_offset_pos) {
+        backpatch_svar(&b, jmp_offset_pos, jmp_offset);
+        backpatch_svar(&b, while_offset_pos, while_offset);
+    } else {
+        backpatch_svar(&b, while_offset_pos, while_offset);
+        backpatch_svar(&b, jmp_offset_pos, jmp_offset);
+    }
     
     return b;
 }
@@ -468,7 +473,7 @@ static ByteBuf build_stack_overflow_demo(void) {
     emit_op(&b, M_B);                            /* B */
     
     /* Push a value (simulate work) */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* push 1 */
+    emit_lit(&b, 1);      /* push 1 */
     emit_op(&b, M_DRP);                          /* drop */
     
     /* Recursive call to self */
@@ -483,7 +488,7 @@ static ByteBuf build_stack_overflow_demo(void) {
     emit_uvar(&b, 0);                            /* argc = 0 */
     
     /* This should never be reached due to stack overflow */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 999);
+    emit_lit(&b, 999);
     emit_op(&b, M_HALT);
     
     return b;
@@ -502,9 +507,8 @@ static ByteBuf build_gc_demo(void) {
     
     /* Allocate several small objects */
     for (int i = 0; i < 5; i++) {
-        emit_op(&b, M_LIT);  emit_uvar(&b, 16);     /* size = 16 */
-        emit_op(&b, M_ALLOC);                        /* ALLOC opcode */
-        emit_uvar(&b, 16);                           /* size */
+        emit_lit(&b, 16);     /* size = 16 */
+        emit_op(&b, M_ALLOC);                        /* ALLOC opcode - size from stack */
         emit_op(&b, M_DRP);                          /* drop ref (creates garbage) */
     }
     
@@ -512,7 +516,7 @@ static ByteBuf build_gc_demo(void) {
     emit_op(&b, M_GC);                               /* Manual GC trigger */
     
     /* Return success */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 1);
+    emit_lit(&b, 1);
     emit_op(&b, M_HALT);
     
     return b;
@@ -528,8 +532,8 @@ static ByteBuf build_breakpoint_demo(void) {
     emit_op(&b, M_BP); emit_uvar(&b, 1);  /* BP, id=1 */
     
     /* Simple computation */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 10);
-    emit_op(&b, M_LIT);  emit_uvar(&b, 20);
+    emit_lit(&b, 10);
+    emit_lit(&b, 20);
     emit_op(&b, M_ADD);
     
     emit_op(&b, M_HALT);
@@ -547,10 +551,10 @@ static ByteBuf build_single_step_demo(void) {
     emit_op(&b, M_STEP);                             /* Enable single-step */
     
     /* Simple computation */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
-    emit_op(&b, M_LIT);  emit_uvar(&b, 3);
+    emit_lit(&b, 5);
+    emit_lit(&b, 3);
     emit_op(&b, M_ADD);                              /* 5 + 3 = 8 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 2);
+    emit_lit(&b, 2);
     emit_op(&b, M_MUL);                              /* 8 * 2 = 16 */
     
     emit_op(&b, M_HALT);
@@ -589,11 +593,11 @@ static void build_for_loop(ByteBuf* b,
     if (emit_init) emit_init(b);
 
     /* 2. L_cond: Emit condition check */
-    int cond_start = b->len;
+    int cond_start = b->op_count;
     if (emit_cond) emit_cond(b);
 
-    /* 3. Emit JZ with 2-byte signed offset placeholder */
-    emit_op(b, M_JZ);
+    /* 3. Emit JZ with signed varint offset placeholder */
+    int jz_op_index = emit_op(b, M_JZ);
     int jz_offset_pos = emit_svar_placeholder(b);
 
     /* 4. L_body: Emit loop body */
@@ -602,35 +606,39 @@ static void build_for_loop(ByteBuf* b,
     /* 5. L_update: Emit update, then jump back to condition */
     if (emit_update) emit_update(b);
 
-    /* 6. Emit JMP with 2-byte signed offset placeholder */
-    emit_op(b, M_JMP);
+    /* 6. Emit JMP with signed varint offset placeholder */
+    int jmp_op_index = emit_op(b, M_JMP);
     int jmp_offset_pos = emit_svar_placeholder(b);
 
     /* 7. L_end: Loop ends here */
-    int loop_end = b->len;
+    int loop_end = b->op_count;
 
     /* 8. Backpatch with signed offsets */
     /* JZ offset: from after JZ arg to loop_end */
-    int jz_after_arg = jz_offset_pos + 2;
-    int jz_offset = loop_end - jz_after_arg;
-    backpatch_svar15(b, jz_offset_pos, jz_offset);
+    int jz_offset = loop_end - (jz_op_index + 1);
 
     /* JMP offset: from after JMP arg to cond_start */
-    int jmp_after_arg = jmp_offset_pos + 2;
-    int jmp_offset = cond_start - jmp_after_arg;
-    backpatch_svar15(b, jmp_offset_pos, jmp_offset);
+    int jmp_offset = cond_start - (jmp_op_index + 1);
+
+    if (jmp_offset_pos > jz_offset_pos) {
+        backpatch_svar(b, jmp_offset_pos, jmp_offset);
+        backpatch_svar(b, jz_offset_pos, jz_offset);
+    } else {
+        backpatch_svar(b, jz_offset_pos, jz_offset);
+        backpatch_svar(b, jmp_offset_pos, jmp_offset);
+    }
 }
 
 /* FOR loop helper: emit init i = 0 */
 static void emit_for_init_i0(ByteBuf* bb) {
-    emit_op(bb, M_LIT);  emit_uvar(bb, 0);
+    emit_lit(bb, 0);
     emit_op(bb, M_LET);  emit_uvar(bb, 1);  /* i = 0 */
 }
 
 /* FOR loop helper: emit cond i < 5 */
 static void emit_for_cond_i_lt_5(ByteBuf* bb) {
     emit_op(bb, M_V);    emit_uvar(bb, 1);  /* i */
-    emit_op(bb, M_LIT);  emit_uvar(bb, 5);  /* 5 */
+    emit_lit(bb, 5);
     emit_op(bb, M_LT);                       /* i < 5 */
 }
 
@@ -645,7 +653,7 @@ static void emit_for_body_sum_i(ByteBuf* bb) {
 /* FOR loop helper: emit update i++ */
 static void emit_for_update_i_inc(ByteBuf* bb) {
     emit_op(bb, M_V);    emit_uvar(bb, 1);  /* i */
-    emit_op(bb, M_LIT);  emit_uvar(bb, 1);  /* 1 */
+    emit_lit(bb, 1);
     emit_op(bb, M_ADD);                      /* i + 1 */
     emit_op(bb, M_LET);  emit_uvar(bb, 1);  /* i = result */
 }
@@ -658,7 +666,7 @@ static ByteBuf build_for_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
 
     /* sum = 0 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 0);
+    emit_lit(&b, 0);
     emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = 0 */
 
     /* FOR (i=0; i<5; i++) { sum += i } */
@@ -690,15 +698,14 @@ static ByteBuf build_memory_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
     
     /* Allocate 16 bytes */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 16);     /* size = 16 */
-    emit_op(&b, M_ALLOC);                        /* ALLOC opcode */
-    emit_uvar(&b, 16);                           /* ALLOC size parameter */
+    emit_lit(&b, 16);     /* size = 16 */
+    emit_op(&b, M_ALLOC);                        /* ALLOC opcode - size from stack */
     
     /* Free the memory */
     emit_op(&b, M_FREE);                         /* FREE the memory */
     
     /* Return 1 to indicate success */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 1);
+    emit_lit(&b, 1);
     emit_op(&b, M_HALT);
     
     return b;
@@ -709,15 +716,15 @@ static ByteBuf build_bitwise_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
     
     /* 5 AND 3 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
-    emit_op(&b, M_LIT);  emit_uvar(&b, 3);
+    emit_lit(&b, 5);
+    emit_lit(&b, 3);
     emit_op(&b, M_AND);                          /* 5 & 3 = 1 */
     emit_op(&b, M_DUP);                          /* duplicate for second op */
     
     /* 5 OR 3 */
     emit_op(&b, M_DRP);                          /* drop previous result */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
-    emit_op(&b, M_LIT);  emit_uvar(&b, 3);
+    emit_lit(&b, 5);
+    emit_lit(&b, 3);
     emit_op(&b, M_OR);                           /* 5 | 3 = 7 */
     
     emit_op(&b, M_HALT);
@@ -727,9 +734,9 @@ static ByteBuf build_bitwise_demo(void) {
 /* Program 7: Stack operations */
 static ByteBuf build_stack_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
-    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* 1 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 2);      /* 2 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 3);      /* 3 */
+    emit_lit(&b, 1);      /* 1 */
+    emit_lit(&b, 2);      /* 2 */
+    emit_lit(&b, 3);      /* 3 */
     emit_op(&b, M_DUP);                          /* dup: 1,2,3,3 */
     emit_op(&b, M_SWP);                          /* swap: 1,2,3,3 -> 1,2,3,3 */
     emit_op(&b, M_DRP);                          /* drop: 1,2,3 */
@@ -741,7 +748,7 @@ static ByteBuf build_stack_demo(void) {
 static ByteBuf build_io_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
     emit_op(&b, M_GTWAY); emit_uvar(&b, M_GATEWAY_KEY); /* authorize */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 100);            /* value */
+    emit_lit(&b, 100);            /* value */
     emit_op(&b, M_IOW);  emit_uvar(&b, 1);              /* dev=1 */
     emit_op(&b, M_IOR);  emit_uvar(&b, 1);              /* read dev=1 */
     emit_op(&b, M_HALT);
@@ -753,23 +760,23 @@ static ByteBuf build_mod_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
 
     /* Test 1: 10 % 3 = 1 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 10);
-    emit_op(&b, M_LIT);  emit_uvar(&b, 3);
+    emit_lit(&b, 10);
+    emit_lit(&b, 3);
     emit_op(&b, M_MOD);                          /* 10 % 3 = 1 */
     emit_op(&b, M_DUP);                          /* duplicate result */
 
     /* Test 2: -5 % 2 = -1 (C semantics: sign matches a) */
     emit_op(&b, M_DRP);                          /* drop previous */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);       /* -5: encode as signed */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 2);
+    emit_lit(&b, 5);       /* -5: encode as signed */
+    emit_lit(&b, 2);
     emit_op(&b, M_SUB);                          /* -5 = 0 - 5 */
     emit_op(&b, M_MOD);                          /* -5 % 2 = -1 */
     emit_op(&b, M_DUP);                          /* duplicate */
 
     /* Test 3: 5 % -2 = 1 (sign matches a) */
     emit_op(&b, M_DRP);
-    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
-    emit_op(&b, M_LIT);  emit_uvar(&b, 2);
+    emit_lit(&b, 5);
+    emit_lit(&b, 2);
     emit_op(&b, M_SUB);                          /* 5 % -2: 5 - (5/(-2))*(-2) = 5 - (-2)*(-2) = 5 - 4 = 1 */
     emit_op(&b, M_MOD);                          /* 5 % -2 = 1 */
 
@@ -782,23 +789,23 @@ static ByteBuf build_array_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
 
     /* Create array of size 3 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 3);      /* size = 3 */
+    emit_lit(&b, 3);      /* size = 3 */
     emit_op(&b, M_NEWARR);                       /* create array, push ref */
 
     /* Store values: arr[0] = 42, arr[1] = 99, arr[2] = 77 */
     emit_op(&b, M_DUP);                          /* dup arr ref */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* idx = 0 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 42);     /* val = 42 */
+    emit_lit(&b, 0);      /* idx = 0 */
+    emit_lit(&b, 42);     /* val = 42 */
     emit_op(&b, M_STO);                          /* store, push arr */
 
     emit_op(&b, M_DUP);                          /* dup arr ref */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* idx = 1 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 99);     /* val = 99 */
+    emit_lit(&b, 1);      /* idx = 1 */
+    emit_lit(&b, 99);     /* val = 99 */
     emit_op(&b, M_STO);                          /* store, push arr */
 
     emit_op(&b, M_DUP);                          /* dup arr ref */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 2);      /* idx = 2 */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 77);     /* val = 77 */
+    emit_lit(&b, 2);      /* idx = 2 */
+    emit_lit(&b, 77);     /* val = 77 */
     emit_op(&b, M_STO);                          /* store, push arr */
 
     /* Get length - dup arr first so we keep the reference */
@@ -809,12 +816,12 @@ static ByteBuf build_array_demo(void) {
     /* Read back values to verify */
     emit_op(&b, M_DRP);                          /* drop len, keep arr */
     emit_op(&b, M_DUP);                          /* dup arr */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* idx = 0 */
+    emit_lit(&b, 0);      /* idx = 0 */
     emit_op(&b, M_IDX);                          /* push arr[0] = 42 */
 
     emit_op(&b, M_DRP);                          /* drop arr */
     emit_op(&b, M_DUP);                          /* dup arr */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* idx = 1 */
+    emit_lit(&b, 1);      /* idx = 1 */
     emit_op(&b, M_IDX);                          /* push arr[1] = 99 */
 
     emit_op(&b, M_HALT);
@@ -849,10 +856,10 @@ static void run_with_disasm(const char* name, ByteBuf* prog, bool do_simulate) {
         m_disasm_print_trace(&result);
     } else {
         int r = m_vm_run(&vm);
-        printf("\nExecution result: fault=%s, steps=%llu, result=%d\n",
+        printf("\nExecution result: fault=%s, steps=%llu, result=%lld\n",
                m_vm_fault_string(vm.fault),
                (unsigned long long)vm.steps,
-               (vm.sp >= 0) ? (int)vm.stack[vm.sp].u.i : 0);
+               (vm.sp >= 0) ? (long long)vm.stack[vm.sp].u.i : 0LL);
     }
 
     /* Free allocated memory */
@@ -916,3 +923,7 @@ int main(void) {
 
     return 0;
 }
+
+
+
+
