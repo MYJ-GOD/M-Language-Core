@@ -177,6 +177,69 @@ static void h_swp(M_VM* v) {
     v->stack[v->sp] = a;
 }
 
+/* --- Memory Management --- */
+
+static void h_alloc(M_VM* v) {
+    /* ALLOC: <size> -> <ptr>
+     * Allocate memory on the heap and push a pointer to it.
+     * The pointer is stored as a reference type.
+     * Bytecode format: ALLOC, <size>
+     */
+    NEED(v, 1);
+    int32_t size = to_int(POP(v));
+
+    if (size <= 0) { SET_FAULT(v, M_FAULT_BAD_ARG); return; }
+    if (size > 1000000) { SET_FAULT(v, M_FAULT_BAD_ARG); return; }  /* Sanity limit */
+
+    /* Decode size parameter from bytecode and advance PC */
+    uint32_t enc_size = 0;
+    int pc = v->pc;
+    if (!m_vm_decode_uvarint(v->code, &pc, v->code_len, &enc_size)) {
+        SET_FAULT(v, M_FAULT_BAD_ENCODING);
+        return;
+    }
+    v->pc = pc;  /* IMPORTANT: advance PC past the parameter */
+
+    void* ptr = malloc((size_t)size);
+    if (!ptr) { SET_FAULT(v, M_FAULT_OOM); return; }
+
+    /* Track allocation for cleanup */
+    AllocNode* node = (AllocNode*)malloc(sizeof(AllocNode));
+    if (!node) {
+        free(ptr);
+        SET_FAULT(v, M_FAULT_OOM);
+        return;
+    }
+    node->ptr = ptr;
+    node->next = v->alloc_head;
+    v->alloc_head = node;
+
+    /* Push pointer as a reference */
+    M_Value ref;
+    ref.type = M_TYPE_REF;
+    ref.u.ref = ptr;
+    PUSH(v, ref);
+}
+
+static void h_free(M_VM* v) {
+    /* FREE: <ptr> -> (pop)
+     * Free previously allocated memory.
+     */
+    NEED(v, 1);
+    M_Value ref = POP(v);
+
+    if (ref.type != M_TYPE_REF || ref.u.ref == NULL) {
+        SET_FAULT(v, M_FAULT_TYPE_MISMATCH);
+        return;
+    }
+
+    /* Free the memory */
+    free(ref.u.ref);
+
+    /* Remove from allocation tracking (simplified - doesn't remove from list) */
+    /* In a real implementation, we'd need to find and remove the node */
+}
+
 static void h_rot(M_VM* v) {
     NEED(v, 3);
     M_Value a = v->stack[v->sp - 2];
@@ -771,6 +834,8 @@ static const uint32_t GAS_COST[256] = {
     [M_GET]    = 2,
     [M_PUT]    = 3,
     [M_SWP]    = 1,
+    [M_ALLOC]  = 5,      /* Memory allocation */
+    [M_FREE]   = 2,      /* Memory free */
     [M_LEN]    = 2,
     [M_NEWARR] = 5,
     [M_IDX]    = 2,
@@ -823,6 +888,8 @@ static const handler TABLE[256] = {
     [M_GET]    = h_get,
     [M_PUT]    = h_put,
     [M_SWP]    = h_swp,
+    [M_ALLOC]  = h_alloc,
+    [M_FREE]   = h_free,
     [M_LEN]    = h_len,
     [M_NEWARR] = h_newarr,
     [M_IDX]    = h_idx,
@@ -1172,6 +1239,10 @@ const char* m_vm_opcode_name(uint32_t op) {
         /* IO */
         case M_IOW:  return "IOW";
         case M_IOR:  return "IOR";
+
+        /* Memory */
+        case M_ALLOC: return "ALLOC";
+        case M_FREE:  return "FREE";
 
         /* System */
         case M_GTWAY: return "GTWAY";

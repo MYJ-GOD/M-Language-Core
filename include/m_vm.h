@@ -71,6 +71,10 @@
 /* --- Swap (69) --- */
 #define M_SWP  69   /* Swap: a,b -> b,a (swap top two) */
 
+/* --- Memory Management (90-91) --- */
+#define M_ALLOC 90  /* Allocate: <size> -> <ptr> (allocate heap memory) */
+#define M_FREE  91  /* Free: <ptr> -> (free heap memory, pop ptr) */
+
 /* --- Hardware IO (70-79) --- */
 #define M_IOW  70   /* IO Write: IOW,<device_id>,<value> */
 #define M_IOR  71   /* IO Read: IOR,<device_id> -> <value> */

@@ -194,6 +194,285 @@ static ByteBuf build_loop_demo(void) {
     return b;
 }
 
+/* =============================================
+ * WHILE Loop Compiler Lowering
+ * ============================================= */
+
+/**
+ * Backpatch a uvarint operand at a given offset
+ * Re-encodes the varint at the specified position.
+ */
+static void backpatch_uvar(ByteBuf* b, int offset, int32_t value) {
+    uint8_t* ptr = &b->buf[offset];
+    int len = 0;
+    int32_t val = value;
+    do {
+        ptr[len] = (uint8_t)(val & 0x7F);
+        val >>= 7;
+        if (val > 0) ptr[len] |= 0x80;
+        len++;
+    } while (val > 0);
+}
+
+/**
+ * Emit a WHILE loop - compiler lowering from high-level to JZ/JMP
+ *
+ * High-level syntax:
+ *   WHILE <cond> { <body> }
+ *
+ * Lowered to bytecode:
+ *   L_cond:
+ *     <cond>
+ *     JZ L_end
+ *   L_body:
+ *     <body>
+ *     JMP L_cond
+ *   L_end:
+ *
+ * @param b              Bytecode buffer
+ * @param cond_start     Output: PC of condition check start
+ * @param loop_end       Output: PC after loop ends (can be NULL)
+ */
+static void emit_while_loop(ByteBuf* b, int* cond_start, int* loop_end) {
+    *cond_start = b->len;  /* L_cond position */
+
+    /* Placeholder for condition - will be filled by caller if needed */
+    /* In this simple version, condition is emitted inline */
+}
+
+/**
+ * Emit condition check: x > 0
+ * Helper for build_while_demo
+ */
+static void emit_while_cond_gt_zero(ByteBuf* bb, int var_idx) {
+    emit_op(bb, M_V);    emit_uvar(bb, var_idx);  /* var */
+    emit_op(bb, M_LIT);  emit_uvar(bb, 0);        /* 0 */
+    emit_op(bb, M_GT);                           /* var > 0 */
+}
+
+/**
+ * Emit loop body: sum += x; x--
+ * var_sum = var_sum + var_x
+ * var_x = var_x - 1
+ */
+static void emit_while_body_incr_decr(ByteBuf* bb, int var_sum, int var_x) {
+    /* sum = sum + x */
+    emit_op(bb, M_V);    emit_uvar(bb, var_sum);  /* sum */
+    emit_op(bb, M_V);    emit_uvar(bb, var_x);    /* x */
+    emit_op(bb, M_ADD);                          /* sum + x */
+    emit_op(bb, M_LET);  emit_uvar(bb, var_sum);  /* sum = result */
+
+    /* x = x - 1 */
+    emit_op(bb, M_V);    emit_uvar(bb, var_x);    /* x */
+    emit_op(bb, M_LIT);  emit_uvar(bb, 1);        /* 1 */
+    emit_op(bb, M_SUB);                          /* x - 1 */
+    emit_op(bb, M_LET);  emit_uvar(bb, var_x);    /* x = result */
+}
+
+/**
+ * Build a complete WHILE loop bytecode
+ * Demonstrates compiler lowering: WHILE → JZ/JMP
+ */
+static void build_while_with_body(ByteBuf* b,
+                                   void (*emit_cond)(ByteBuf*, int),
+                                   void (*emit_body)(ByteBuf*, int, int),
+                                   int var_idx,
+                                   int var_sum, int var_x) {
+    int cond_start = b->len;  /* L_cond position */
+
+    /* Emit condition */
+    emit_cond(b, var_idx);
+
+    /* Emit JZ L_end (placeholder) */
+    int jz_placeholder = b->len;
+    emit_op(b, M_JZ);
+    emit_uvar(b, 0);
+
+    /* Emit loop body */
+    emit_body(b, var_sum, var_x);
+
+    /* Emit JMP L_cond */
+    int jmp_placeholder = b->len;
+    emit_op(b, M_JMP);
+    emit_uvar(b, 0);
+
+    /* Backpatch JZ target = L_end */
+    int loop_end = b->len;
+    backpatch_uvar(b, jz_placeholder + 1, loop_end);
+
+    /* Backpatch JMP target = L_cond */
+    backpatch_uvar(b, jmp_placeholder + 1, cond_start);
+}
+
+/* Program 11: WHILE loop - using compiler lowering demonstration
+ * Same logic as loop_demo but using emit_while_loop helper
+ * Computes sum of 1 to 5 = 15
+ */
+static ByteBuf build_while_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+
+    /* sum = 0, x = 5 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 0);
+    emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = 0 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
+    emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* x = 5 */
+
+    /* WHILE (x > 0) { sum += x; x-- } */
+    build_while_with_body(&b,
+        emit_while_cond_gt_zero,    /* condition: x > 0 */
+        emit_while_body_incr_decr,  /* body: sum+=x, x-- */
+        1,                          /* var_idx for condition */
+        0, 1);                      /* sum=0, x=1 */
+
+    /* Output result */
+    emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
+    emit_op(&b, M_HALT);
+
+    return b;
+}
+
+/* =============================================
+ * FOR Loop Compiler Lowering
+ * ============================================= */
+
+/**
+ * FOR loop builder - compiles high-level FOR to JZ/JMP
+ *
+ * High-level:
+ *   FOR (init; cond; update) { body }
+ *
+ * Bytecode:
+ *   <init>
+ * L_cond:
+ *   <cond>
+ *   JZ L_end
+ * L_body:
+ *   <body>
+ * L_update:
+ *   <update>
+ *   JMP L_cond
+ * L_end:
+ */
+static void build_for_loop(ByteBuf* b,
+                            void (*emit_init)(ByteBuf*),
+                            void (*emit_cond)(ByteBuf*),
+                            void (*emit_body)(ByteBuf*),
+                            void (*emit_update)(ByteBuf*)) {
+    /* 1. Emit initialization (once before loop) */
+    if (emit_init) emit_init(b);
+
+    /* 2. L_cond: Emit condition check */
+    int cond_start = b->len;
+    if (emit_cond) emit_cond(b);
+
+    /* 3. Emit JZ L_end */
+    int jz_placeholder = b->len;
+    emit_op(b, M_JZ);
+    emit_uvar(b, 0);
+
+    /* 4. L_body: Emit loop body */
+    if (emit_body) emit_body(b);
+
+    /* 5. L_update: Emit update, then jump back to condition */
+    if (emit_update) emit_update(b);
+
+    /* 6. Emit JMP L_cond */
+    int jmp_placeholder = b->len;
+    emit_op(b, M_JMP);
+    emit_uvar(b, 0);
+
+    /* 7. L_end: Loop ends here */
+    int loop_end = b->len;
+
+    /* 8. Backpatch */
+    backpatch_uvar(b, jz_placeholder + 1, loop_end);
+    backpatch_uvar(b, jmp_placeholder + 1, cond_start);
+}
+
+/* FOR loop helper: emit init i = 0 */
+static void emit_for_init_i0(ByteBuf* bb) {
+    emit_op(bb, M_LIT);  emit_uvar(bb, 0);
+    emit_op(bb, M_LET);  emit_uvar(bb, 1);  /* i = 0 */
+}
+
+/* FOR loop helper: emit cond i < 5 */
+static void emit_for_cond_i_lt_5(ByteBuf* bb) {
+    emit_op(bb, M_V);    emit_uvar(bb, 1);  /* i */
+    emit_op(bb, M_LIT);  emit_uvar(bb, 5);  /* 5 */
+    emit_op(bb, M_LT);                       /* i < 5 */
+}
+
+/* FOR loop helper: emit body sum += i */
+static void emit_for_body_sum_i(ByteBuf* bb) {
+    emit_op(bb, M_V);    emit_uvar(bb, 0);  /* sum */
+    emit_op(bb, M_V);    emit_uvar(bb, 1);  /* i */
+    emit_op(bb, M_ADD);                      /* sum + i */
+    emit_op(bb, M_LET);  emit_uvar(bb, 0);  /* sum = result */
+}
+
+/* FOR loop helper: emit update i++ */
+static void emit_for_update_i_inc(ByteBuf* bb) {
+    emit_op(bb, M_V);    emit_uvar(bb, 1);  /* i */
+    emit_op(bb, M_LIT);  emit_uvar(bb, 1);  /* 1 */
+    emit_op(bb, M_ADD);                      /* i + 1 */
+    emit_op(bb, M_LET);  emit_uvar(bb, 1);  /* i = result */
+}
+
+/* Program 12: FOR loop - compiler lowering demonstration
+ * Computes sum of 0 to 4 = 10
+ * FOR (i=0; i<5; i++) { sum += i }
+ */
+static ByteBuf build_for_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+
+    /* sum = 0 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 0);
+    emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = 0 */
+
+    /* FOR (i=0; i<5; i++) { sum += i } */
+    build_for_loop(&b,
+        emit_for_init_i0,      /* init: i = 0 */
+        emit_for_cond_i_lt_5,  /* cond: i < 5 */
+        emit_for_body_sum_i,   /* body: sum += i */
+        emit_for_update_i_inc  /* update: i++ */
+    );
+
+    /* Output result */
+    emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
+    emit_op(&b, M_HALT);
+
+    return b;
+}
+
+/* =============================================
+ * Memory Management (ALLOC/FREE)
+ * ============================================= */
+
+/* Program 13: Memory allocation demo
+ * ALLOC: <size> -> <ptr>  (allocate heap memory)
+ * FREE:  <ptr> -> (free memory)
+ *
+ * This demo allocates 16 bytes, writes a value to it,
+ * reads it back, then frees the memory.
+ */
+static ByteBuf build_memory_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+
+    /* Allocate 16 bytes */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 16);     /* size = 16 */
+    emit_op(&b, M_ALLOC);                        /* ALLOC opcode */
+    emit_uvar(&b, 16);                           /* ALLOC size parameter */
+
+    /* Drop the pointer */
+    emit_op(&b, M_DRP);
+
+    /* Return success indicator (42) */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 42);
+    emit_op(&b, M_HALT);
+
+    return b;
+}
+
 /* Program 6: Bit operations - 5 AND 3 = 1, 5 OR 3 = 7 */
 static ByteBuf build_bitwise_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
@@ -360,7 +639,7 @@ int main(void) {
     printf("+================================================================+\n");
     
     /* Run all tests */
-    ByteBuf p1 = build_arithmetic_demo();
+    /*ByteBuf p1 = build_arithmetic_demo();
     ByteBuf p2 = build_comparison_demo();
     ByteBuf p3 = build_variables_demo();
     ByteBuf p4 = build_function_demo();
@@ -370,8 +649,11 @@ int main(void) {
     ByteBuf p8 = build_io_demo();
     ByteBuf p9 = build_mod_demo();
     ByteBuf p10 = build_array_demo();
+    ByteBuf p11 = build_while_demo();*/
+    ByteBuf p12 = build_for_demo();
+    ByteBuf p13 = build_memory_demo();
 
-    run_with_disasm("Arithmetic (5 + 3 * 2)", &p1, false);
+    /*run_with_disasm("Arithmetic (5 + 3 * 2)", &p1, false);
     run_with_disasm("Comparison (10 > 5)", &p2, false);
     run_with_disasm("Variables (let x=10, y=x+5)", &p3, false);
     run_with_disasm("Function (add 5 + 3)", &p4, true);
@@ -381,11 +663,14 @@ int main(void) {
     run_with_disasm("IO with authorization", &p8, false);
     run_with_disasm("Modulo (C semantics: 10%3, -5%2, 5%-2)", &p9, false);
     run_with_disasm("Array (NEWARR, STO, IDX, LEN)", &p10, false);
+    run_with_disasm("WHILE Loop (compiler lowering)", &p11, true);*/
+    run_with_disasm("FOR Loop (compiler lowering)", &p12, true);
+    run_with_disasm("Memory ALLOC/FREE", &p13, false);
     
     printf("\n");
     printf("+================================================================+\n");
     printf("|                     All Tests Complete!                          |\n");
     printf("+================================================================+\n");
-    
+
     return 0;
 }

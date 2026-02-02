@@ -194,6 +194,7 @@ static void disasm_scan_labels(DisasmContext* ctx) {
             case M_WAIT:
             case M_IOW:
             case M_IOR:
+            case M_ALLOC:
             case M_TRACE:
             case M_PH:
             case M_HALT: {
@@ -216,6 +217,7 @@ static void disasm_scan_labels(DisasmContext* ctx) {
             case M_ROT:
             case M_RT:
             case M_E:
+            case M_FREE:
                 /* These instructions have no operands */
                 break;
             default:
@@ -485,7 +487,17 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
             }
             break;
         }
-        
+
+        case M_ALLOC: {
+            uint32_t size = 0;
+            int after_pc = *next_pc;
+            if (m_vm_decode_uvarint(ctx->code, &after_pc, ctx->len, &size)) {
+                disasm_printf(ctx, "%u", (unsigned)size);
+                *next_pc = after_pc;
+            }
+            break;
+        }
+
         case M_TRACE: {
             uint32_t level = 0;
             int after_pc = *next_pc;
