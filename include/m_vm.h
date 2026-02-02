@@ -27,6 +27,8 @@
 #define M_RT   16   /* Return: RT,<value> */
 #define M_CL   17   /* Call: CL,<func_id>,<argc>,<arg0>..<argN> */
 #define M_PH   18   /* Placeholder (for alignment/padding) */
+#define M_DO   19   /* Do-while loop begin: DO,<body>,WHILE,<cond> */
+#define M_DWHL 20   /* Do-while loop end (jump back if cond true): WHILE,<target_addr> */
 
 /* --- Data Operations (30-39) --- */
 #define M_LIT  30   /* Literal: LIT,<varint|dict_id> */

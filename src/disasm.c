@@ -197,7 +197,8 @@ static void disasm_scan_labels(DisasmContext* ctx) {
             case M_ALLOC:
             case M_TRACE:
             case M_PH:
-            case M_HALT: {
+            case M_HALT:
+            case M_DWHL: {
                 /* These instructions have operands */
                 uint32_t val = 0;
                 int pc2 = pc;
@@ -218,6 +219,7 @@ static void disasm_scan_labels(DisasmContext* ctx) {
             case M_RT:
             case M_E:
             case M_FREE:
+            case M_DO:
                 /* These instructions have no operands */
                 break;
             default:
@@ -426,6 +428,18 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
             break;
         }
         
+        case M_DWHL: {
+            uint32_t target = 0;
+            int pc2 = *next_pc;
+            if (m_vm_decode_uvarint(ctx->code, &pc2, ctx->len, &target)) {
+                disasm_printf(ctx, "L%u, <cond>", (unsigned)target);
+                *next_pc = pc2;
+            } else {
+                disasm_printf(ctx, "<target>, <cond>");
+            }
+            break;
+        }
+        
         case M_FN: {
             uint32_t arity = 0;
             int after_pc = *next_pc;
@@ -445,6 +459,10 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
         case M_E:
             ctx->indent--;
             disasm_printf(ctx, "; block end");
+            break;
+        
+        case M_DO:
+            disasm_printf(ctx, "; do { body } while");
             break;
         
         /* System ops */
@@ -497,6 +515,9 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
             }
             break;
         }
+
+        case M_FREE:
+            break;
 
         case M_TRACE: {
             uint32_t level = 0;

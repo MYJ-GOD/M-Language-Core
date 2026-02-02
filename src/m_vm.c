@@ -90,7 +90,7 @@ uint32_t m_vm_encode_zigzag(int32_t n) {
 } while(0)
 
 #define CHECK_RET_PUSH(vm) do { \
-    if ((vm)->rp + 1 >= RET_STACK_SIZE) { SET_FAULT((vm), M_FAULT_RET_STACK_OVERFLOW); return; } \
+    if ((size_t)(vm)->rp + 1 >= RET_STACK_SIZE) { SET_FAULT((vm), M_FAULT_RET_STACK_OVERFLOW); return; } \
 } while(0)
 
 #define CHECK_RET_POP(vm) do { \
@@ -233,11 +233,20 @@ static void h_free(M_VM* v) {
         return;
     }
 
+    /* Find and remove from allocation tracking */
+    AllocNode** p = &v->alloc_head;
+    while (*p) {
+        if ((*p)->ptr == ref.u.ref) {
+            AllocNode* to_free = *p;
+            *p = (*p)->next;
+            free(to_free);
+            break;
+        }
+        p = &(*p)->next;
+    }
+
     /* Free the memory */
     free(ref.u.ref);
-
-    /* Remove from allocation tracking (simplified - doesn't remove from list) */
-    /* In a real implementation, we'd need to find and remove the node */
 }
 
 static void h_rot(M_VM* v) {
@@ -623,6 +632,33 @@ static void h_jz(M_VM* v) {
     }
 }
 
+static void h_do(M_VM* v) {
+    /* DO marker - no-op, just advances PC */
+    /* DO is a marker instruction for do-while loops */
+}
+
+static void h_dwhl(M_VM* v) {
+    /* DO-WHILE loop: jump back to DO if condition is true
+     * Format: DO,<body>,WHILE,<cond>
+     * When we reach WHILE, we pop the condition and jump back if true.
+     */
+    NEED(v, 1);
+    int32_t cond = to_int(POP(v));
+    int pc = v->pc;
+    uint32_t target = 0;
+    
+    if (!m_vm_decode_uvarint(v->code, &pc, v->code_len, &target)) {
+        SET_FAULT(v, M_FAULT_BAD_ENCODING);
+        return;
+    }
+    v->pc = pc;
+    
+    if (cond != 0) {
+        CHECK_PC(v, target);
+        v->pc = (int)target;
+    }
+}
+
 static void h_jmp(M_VM* v) {
     /* Unconditional jump: JMP,<target_addr> */
     int pc = v->pc;
@@ -853,7 +889,9 @@ static const uint32_t GAS_COST[256] = {
     [M_IOW]    = 5,
     [M_IOR]    = 3,
     [M_TRACE]  = 1,
-    [M_PH]     = 0
+    [M_PH]     = 0,
+    [M_DWHL]   = 1,
+    [M_DO]     = 0
 };
 
 /* =============================================
@@ -908,7 +946,9 @@ static const handler TABLE[256] = {
     [M_IOW]    = h_iow,
     [M_IOR]    = h_ior,
     [M_TRACE]  = h_trace,
-    [M_PH]     = h_ph
+    [M_PH]     = h_ph,
+    [M_DWHL]   = h_dwhl,
+    [M_DO]     = h_do
 };
 
 /* =============================================
@@ -1120,7 +1160,7 @@ int m_vm_call(M_VM* vm, uint32_t func_id, int argc, M_Value* args) {
     }
 
     /* Push return address */
-    if (vm->rp + 1 >= RET_STACK_SIZE) {
+    if ((size_t)vm->rp + 1 >= (size_t)RET_STACK_SIZE) {
         SET_FAULT(vm, M_FAULT_RET_STACK_OVERFLOW);
         return -1;
     }
@@ -1196,6 +1236,8 @@ const char* m_vm_opcode_name(uint32_t op) {
         case M_RT:   return "RT";
         case M_CL:   return "CL";
         case M_PH:   return "PH";
+        case M_DO:   return "DO";
+        case M_DWHL: return "DWHL";
 
         /* Data */
         case M_LIT:  return "LIT";

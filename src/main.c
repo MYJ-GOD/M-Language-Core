@@ -96,29 +96,56 @@ static ByteBuf build_variables_demo(void) {
     return b;
 }
 
-/* Program 4: Function call - define add(a,b), call add(5,3) */
-static ByteBuf build_function_demo(void) {
+/* Program 4: Nested function call demo
+ * Demonstrates nested function calls with proper frame management.
+ *
+ * Functions:
+ *   add(a, b) = a + b
+ *   double(x) = add(x, x)  [nested call]
+ *   main = double(5) + double(3) = 25 + 6 = 31
+ */
+static ByteBuf build_nested_function_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
     
-    /* === Function definition === */
-    int fn_start = b.len;
+    /* === Function: add(a, b) at offset 0 === */
+    int fn_add = b.len;
     emit_op(&b, M_FN); emit_uvar(&b, 2);       /* FN arity=2 */
     emit_op(&b, M_B);                            /* B (block begin) */
-    
-    /* Function body: a + b */
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* V 0 (a) */
     emit_op(&b, M_V);    emit_uvar(&b, 1);      /* V 1 (b) */
     emit_op(&b, M_ADD);                          /* a + b */
     emit_op(&b, M_RT);                           /* RT (return) */
+    emit_op(&b, M_E);                            /* E (block end) */
     
+    /* === Function: double(x) = add(x, x) at offset fn_double === */
+    int fn_double = b.len;
+    emit_op(&b, M_FN); emit_uvar(&b, 1);       /* FN arity=1 */
+    emit_op(&b, M_B);                            /* B (block begin) */
+    
+    /* Push argument twice for add(x, x) */
+    emit_op(&b, M_V);    emit_uvar(&b, 0);      /* V 0 (x) - first arg */
+    emit_op(&b, M_V);    emit_uvar(&b, 0);      /* V 0 (x) - second arg */
+    
+    /* Call add(x, x) - nested call! */
+    emit_op(&b, M_CL); emit_uvar(&b, fn_add);  /* CL to add */
+    emit_uvar(&b, 2);                            /* argc = 2 */
+    
+    emit_op(&b, M_RT);                           /* RT (return double result) */
     emit_op(&b, M_E);                            /* E (block end) */
     
     /* === Main program === */
-    /* Call function with args: CL,<addr>,<argc>,<arg0>,<arg1> */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 3);      /* arg1 = 3 */
+    /* double(5) */
     emit_op(&b, M_LIT);  emit_uvar(&b, 5);      /* arg0 = 5 */
-    emit_op(&b, M_CL);  emit_uvar(&b, fn_start); /* func_id */
-    emit_uvar(&b, 2);                            /* argc = 2 */
+    emit_op(&b, M_CL);  emit_uvar(&b, fn_double); /* CL to double */
+    emit_uvar(&b, 1);                            /* argc = 1 */
+    
+    /* double(3) */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 3);      /* arg0 = 3 */
+    emit_op(&b, M_CL);  emit_uvar(&b, fn_double); /* CL to double */
+    emit_uvar(&b, 1);                            /* argc = 1 */
+    
+    /* Add results: double(5) + double(3) = 25 + 6 = 31 */
+    emit_op(&b, M_ADD);
     emit_op(&b, M_HALT);
     
     return b;
@@ -331,6 +358,85 @@ static ByteBuf build_while_demo(void) {
     return b;
 }
 
+/* Program 11b: DO-WHILE loop demo (execute body first, then check condition)
+ * DO-WHILE: do { body } while (cond);
+ * Format: DO, <body>, <cond>, DWHL, <do_start_addr>
+ */
+static ByteBuf build_do_while_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+    
+    /* sum = 0, i = 5 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 0);
+    emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = 0 */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 5);
+    emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* i = 5 */
+    
+    /* DO loop start */
+    int do_start = b.len;
+    emit_op(&b, M_DO);                           /* DO marker */
+    
+    /* Loop body: sum += i, i-- */
+    emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
+    emit_op(&b, M_V);    emit_uvar(&b, 1);      /* i */
+    emit_op(&b, M_ADD);                          /* sum + i */
+    emit_op(&b, M_LET);  emit_uvar(&b, 0);      /* sum = result */
+    
+    emit_op(&b, M_V);    emit_uvar(&b, 1);      /* i */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* 1 */
+    emit_op(&b, M_SUB);                          /* i - 1 */
+    emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* i = result */
+    
+    /* Condition: i > 0 */
+    emit_op(&b, M_V);    emit_uvar(&b, 1);      /* i */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 0);      /* 0 */
+    emit_op(&b, M_GT);                           /* i > 0 */
+    
+    /* DWHL: if cond != 0, jump to DO */
+    emit_op(&b, M_DWHL); emit_uvar(&b, do_start); /* DWHL, jump to DO */
+    
+    /* Return sum */
+    emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
+    emit_op(&b, M_HALT);
+    
+    return b;
+}
+
+/* Program 14: Stack overflow protection demo
+ * This demo shows that the VM correctly detects stack overflow.
+ * 
+ * We create a function that calls itself recursively without returning.
+ * The return stack will overflow and trigger RET_STACK_OVERFLOW fault.
+ */
+static ByteBuf build_stack_overflow_demo(void) {
+    ByteBuf b; memset(&b, 0, sizeof(b));
+    
+    /* Function: recurse() - calls itself infinitely */
+    int fn_recurse = b.len;
+    emit_op(&b, M_FN); emit_uvar(&b, 0);       /* FN arity=0 */
+    emit_op(&b, M_B);                            /* B */
+    
+    /* Push a value (simulate work) */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 1);      /* push 1 */
+    emit_op(&b, M_DRP);                          /* drop */
+    
+    /* Recursive call to self */
+    emit_op(&b, M_CL); emit_uvar(&b, fn_recurse); /* recurse() */
+    emit_uvar(&b, 0);                            /* argc = 0 */
+    
+    emit_op(&b, M_RT);                           /* RT (never reached) */
+    emit_op(&b, M_E);                            /* E */
+    
+    /* Main: call the recursive function */
+    emit_op(&b, M_CL); emit_uvar(&b, fn_recurse); /* recurse() */
+    emit_uvar(&b, 0);                            /* argc = 0 */
+    
+    /* This should never be reached due to stack overflow */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 999);
+    emit_op(&b, M_HALT);
+    
+    return b;
+}
+
 /* =============================================
  * FOR Loop Compiler Lowering
  * ============================================= */
@@ -448,28 +554,27 @@ static ByteBuf build_for_demo(void) {
  * Memory Management (ALLOC/FREE)
  * ============================================= */
 
-/* Program 13: Memory allocation demo
+/* Program 13: Memory allocation and deallocation demo
  * ALLOC: <size> -> <ptr>  (allocate heap memory)
  * FREE:  <ptr> -> (free memory)
  *
- * This demo allocates 16 bytes, writes a value to it,
- * reads it back, then frees the memory.
+ * This demo allocates memory, writes a value, reads it back, then frees.
  */
 static ByteBuf build_memory_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
-
+    
     /* Allocate 16 bytes */
     emit_op(&b, M_LIT);  emit_uvar(&b, 16);     /* size = 16 */
     emit_op(&b, M_ALLOC);                        /* ALLOC opcode */
     emit_uvar(&b, 16);                           /* ALLOC size parameter */
-
-    /* Drop the pointer */
-    emit_op(&b, M_DRP);
-
-    /* Return success indicator (42) */
-    emit_op(&b, M_LIT);  emit_uvar(&b, 42);
+    
+    /* Free the memory */
+    emit_op(&b, M_FREE);                         /* FREE the memory */
+    
+    /* Return 1 to indicate success */
+    emit_op(&b, M_LIT);  emit_uvar(&b, 1);
     emit_op(&b, M_HALT);
-
+    
     return b;
 }
 
@@ -642,7 +747,7 @@ int main(void) {
     /*ByteBuf p1 = build_arithmetic_demo();
     ByteBuf p2 = build_comparison_demo();
     ByteBuf p3 = build_variables_demo();
-    ByteBuf p4 = build_function_demo();
+    ByteBuf p4 = build_nested_function_demo();
     ByteBuf p5 = build_loop_demo();
     ByteBuf p6 = build_bitwise_demo();
     ByteBuf p7 = build_stack_demo();
@@ -652,9 +757,12 @@ int main(void) {
     ByteBuf p11 = build_while_demo();*/
     ByteBuf p12 = build_for_demo();
     ByteBuf p13 = build_memory_demo();
+    ByteBuf p11b = build_do_while_demo();
+    ByteBuf p14 = build_stack_overflow_demo();
 
     /*run_with_disasm("Arithmetic (5 + 3 * 2)", &p1, false);
     run_with_disasm("Comparison (10 > 5)", &p2, false);
+    run_with_disasm("Nested function calls (double = add(x,x), main = double(5)+double(3))", &p4, true);
     run_with_disasm("Variables (let x=10, y=x+5)", &p3, false);
     run_with_disasm("Function (add 5 + 3)", &p4, true);
     run_with_disasm("Loop (sum 1 to 5)", &p5, true);
@@ -664,8 +772,12 @@ int main(void) {
     run_with_disasm("Modulo (C semantics: 10%3, -5%2, 5%-2)", &p9, false);
     run_with_disasm("Array (NEWARR, STO, IDX, LEN)", &p10, false);
     run_with_disasm("WHILE Loop (compiler lowering)", &p11, true);*/
+    ByteBuf p4 = build_nested_function_demo();
+    run_with_disasm("Nested Function Calls (double(x)=add(x,x), main=double(5)+double(3)=31)", &p4, true);
+    run_with_disasm("DO-WHILE Loop (do { sum+=i; i-- } while i>0, sum=1..5=15)", &p11b, true);
     run_with_disasm("FOR Loop (compiler lowering)", &p12, true);
     run_with_disasm("Memory ALLOC/FREE", &p13, false);
+    run_with_disasm("Stack Overflow Protection (recursive function triggers overflow)", &p14, true);
     
     printf("\n");
     printf("+================================================================+\n");
