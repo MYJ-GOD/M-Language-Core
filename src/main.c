@@ -151,7 +151,7 @@ static ByteBuf build_variables_demo(void) {
  * Functions:
  *   add(a, b) = a + b
  *   double(x) = add(x, x)  [nested call]
- *   main = double(5) + double(3) = 25 + 6 = 31
+ *   main = double(5) + double(3) = 10 + 6 = 16
  */
 static ByteBuf build_nested_function_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
@@ -258,7 +258,7 @@ static ByteBuf build_loop_demo(void) {
 }
 
 /* =============================================
- * WHILE Loop Compiler Lowering
+ * WHILE Loop (Core WH)
  * ============================================= */
 
 /**
@@ -389,9 +389,8 @@ static ByteBuf build_do_while_demo(void) {
     return b;
 }
 
-/* Program 12: WHILE loop demo (check condition first, then execute body)
- * WHILE: while (condition) { body }
- * Format: <cond>, WHILE,<body_addr>, <body>, JMP,<cond_addr>
+/* Program 12: WHILE loop demo (core structured WH)
+ * WH: <cond>,WH,B<body>,E
  */
 static ByteBuf build_while_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
@@ -410,11 +409,9 @@ static ByteBuf build_while_demo(void) {
     emit_lit(&b, 0);      /* 0 */
     emit_op(&b, M_GT);                           /* i > 0 */
     
-    /* Emit WHILE with signed varint offset placeholder */
-    int while_op_index = emit_op(&b, M_WHIL);
-    int while_offset_pos = emit_svar_placeholder(&b);
-    
-    /* Body starts here */
+    /* Core WH marker + body block */
+    emit_op(&b, M_WH);
+    emit_op(&b, M_B);
     
     /* Body: sum = sum + i */
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
@@ -428,32 +425,11 @@ static ByteBuf build_while_demo(void) {
     emit_op(&b, M_SUB);                          /* i - 1 */
     emit_op(&b, M_LET);  emit_uvar(&b, 1);      /* i = result */
     
-    /* Jump back to condition check */
-    int jmp_op_index = emit_op(&b, M_JMP);
-    int jmp_offset_pos = emit_svar_placeholder(&b);
-    
-    /* Exit point */
-    int loop_exit = b.op_count;
+    emit_op(&b, M_E);
     
     /* Output sum */
     emit_op(&b, M_V);    emit_uvar(&b, 0);      /* sum */
     emit_op(&b, M_HALT);
-    
-    /* Backpatch WHILE offset: relative from after WHILE arg to loop_exit */
-    /* If cond == 0, WHILE jumps to loop_exit; otherwise fallthrough to body */
-    int while_offset = loop_exit - (while_op_index + 1);
-    
-    /* Backpatch JMP offset: relative from after JMP arg to cond_start */
-    /* After JMP arg, PC will be at (jmp_offset_pos + 2), so target should be cond_start - (jmp_offset_pos + 2) */
-    int jmp_offset = cond_start - (jmp_op_index + 1);
-
-    if (jmp_offset_pos > while_offset_pos) {
-        backpatch_svar(&b, jmp_offset_pos, jmp_offset);
-        backpatch_svar(&b, while_offset_pos, while_offset);
-    } else {
-        backpatch_svar(&b, while_offset_pos, while_offset);
-        backpatch_svar(&b, jmp_offset_pos, jmp_offset);
-    }
     
     return b;
 }
@@ -747,7 +723,7 @@ static ByteBuf build_stack_demo(void) {
 /* Program 8: Full authorized IO demo */
 static ByteBuf build_io_demo(void) {
     ByteBuf b; memset(&b, 0, sizeof(b));
-    emit_op(&b, M_GTWAY); emit_uvar(&b, M_GATEWAY_KEY); /* authorize */
+    emit_op(&b, M_GTWAY); emit_uvar(&b, 1);             /* authorize device 1 */
     emit_lit(&b, 100);            /* value */
     emit_op(&b, M_IOW);  emit_uvar(&b, 1);              /* dev=1 */
     emit_op(&b, M_IOR);  emit_uvar(&b, 1);              /* read dev=1 */
@@ -900,14 +876,14 @@ int main(void) {
     run_with_disasm("Comparison (10 > 5)", &p2, false);
     run_with_disasm("Nested function calls (double = add(x,x), main = double(5)+double(3))", &p4, true);
     run_with_disasm("Variables (let x=10, y=x+5)", &p3, false);
-    run_with_disasm("Function (add 5 + 3)", &p4, true);
+    /* p4 already covers nested function call behavior */
     run_with_disasm("Loop (sum 1 to 5)", &p5, true);
     run_with_disasm("Bitwise (5 & 3, 5 | 3)", &p6, false);
     run_with_disasm("Stack operations", &p7, false);
     run_with_disasm("IO with authorization", &p8, false);
     run_with_disasm("Modulo (10%3, -5%2, 5%-2)", &p9, false);
     run_with_disasm("Array (NEWARR, STO, IDX, LEN)", &p10, false);
-    run_with_disasm("WHILE Loop (compiler lowering)", &p11, true);
+    run_with_disasm("WHILE Loop (core WH)", &p11, true);
     run_with_disasm("DO-WHILE Loop (do { sum+=i; i-- } while i>0, sum=1..5=15)", &p11b, true);
     run_with_disasm("FOR Loop (compiler lowering)", &p12, true);
     run_with_disasm("Memory ALLOC/FREE", &p13, false);

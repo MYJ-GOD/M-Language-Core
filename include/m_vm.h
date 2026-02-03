@@ -224,6 +224,7 @@ typedef struct M_VM {
     uint8_t* code;
     int      code_len;
     int      pc;
+    uint8_t* code_owned;   /* Lowered/owned bytecode buffer (if any) */
 
     /* Stacks */
     M_Value  stack[STACK_SIZE];
@@ -253,6 +254,7 @@ typedef struct M_VM {
     /* State */
     bool     running;
     bool     authorized;
+    uint8_t  caps[32];     /* Capability bitmap for device_id 0..255 */
 
     /* Execution limits */
     uint64_t steps;
@@ -265,6 +267,7 @@ typedef struct M_VM {
 
     /* Fault tracking */
     M_Fault  fault;
+    int      last_pc;
     uint32_t last_op;
     int      last_op_index;
 

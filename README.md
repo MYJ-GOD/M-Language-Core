@@ -20,9 +20,9 @@ M-Language 由三层构成：
 
 ### 已完成
 
-- **MVM 虚拟机核心**：全 varint 解码、栈机执行、调用帧管理
-- **Core 指令集 (0-99)**：B/E/IF/WH/FR/FN/RT/CL/PH, LIT/V/LET/SET, LT/GT/LE/GE/EQ, ADD/SUB/MUL/DIV/AND/OR/XOR/SHL/SHR, LEN/GET/PUT/SWP, DUP/DRP/ROT, IOW/IOR, GTWAY/WAIT/HALT/TRACE
-- **Extension 指令 (100-199)**：JMP/JZ/JNZ（svarint opcode index offset）, MOD/NEG/NEQ, NEWARR/IDX/STO, GC/BP/STEP（调试/控制）
+- **MVM 虚拟机核心**：全 varint 解码、栈机执行、调用帧管理、token index 映射（opcode index <-> byte offset）
+- **Core 指令集 (0-99)**：B/E/IF/WH/FN/RT/CL/PH, LIT/V/LET/SET, LT/GT/LE/GE/EQ, ADD/SUB/MUL/DIV/AND/OR/XOR/SHL/SHR, LEN/GET/PUT/SWP, DUP/DRP/ROT, IOW/IOR, GTWAY/WAIT/HALT/TRACE
+- **Extension 指令 (100-199)**：JMP/JZ/JNZ（svarint opcode index offset）, MOD/NEG/NOT/NEQ, NEWARR/IDX/STO, GC/BP/STEP（调试/控制）, DO/DWHL/WHIL（旧式循环构造）
 - **平台扩展 (200-239)**：ALLOC/FREE
 - **安全约束**：
   - Step limit（最大执行步数）
@@ -30,11 +30,18 @@ M-Language 由三层构成：
   - Call depth limit（函数调用深度限制，默认 32）
   - Stack limit（运行时栈大小限制）
   - 栈/局部/全局/PC 越界检查
-- **授权机制**：GTWAY 指令（授权后 IO 生效）
-- **字节码验证器（基础版）**：静态验证 opcode/varint/B-E 匹配/locals 访问（暂不覆盖平台扩展 200-239）
-- **调试工具**：反汇编、执行追踪、TRACE
-- **内存管理**：动态内存分配 (ALLOC/FREE) + GC 支持
-- **测试套件**：14+ 个示例程序
+- **授权机制**：GTWAY,<cap_id>（按 device_id 授权），IOW/IOR 均需 capability
+- **字节码验证器（增强版）**：opcode/varint/B-E 匹配/IF/WH/FR 结构、跳转边界、locals/globals、栈效应与 IO 授权检查
+- **调试工具**：反汇编、执行追踪、TRACE、断点/单步
+- **内存管理**：动态内存分配 (ALLOC/FREE) + 简易 GC
+- **测试套件**：17 个示例程序（算术、比较、变量、嵌套函数、JZ/JMP 循环、数组、IO、GC、断点/单步等）
+
+### 部分完成 / 已知限制
+
+- **WH/FR 结构化循环**：VM 在加载期自动 lowering 到 JZ/JMP 以保证语义正确
+- **验证器**：尚未覆盖完整控制流可达性（CFG）分析
+- **GC**：当前仅标记 `M_TYPE_REF`，数组为 `M_TYPE_ARRAY` 时未纳入 root 标记（后续需完善）
+- **JIT**：接口存在但为 stub
 
 ### 进行中
 
@@ -190,6 +197,12 @@ M_ValidatorResult result = m_validate(code, code_len);
 if (!result.valid) {
     printf("Validation failed at PC %d: %s\n", result.pc, result.msg);
 }
+```
+
+### Core-only 验证（对外发布）
+
+```c
+M_ValidatorResult result = m_validate_core_only(code, code_len);
 ```
 
 ### 验证检查项

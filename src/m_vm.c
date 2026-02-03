@@ -223,6 +223,533 @@ static bool build_token_map(M_VM* v) {
     v->token_count = count;
     return true;
 }
+
+/* =============================================
+ * Structured Loop Lowering (WH/FR -> JZ/JMP)
+ * ============================================= */
+
+typedef struct {
+    uint32_t op;
+    int start;
+    int end;
+    uint64_t imm_u64;
+    uint32_t imm_u32;
+    uint32_t imm_u32_b;
+    int32_t imm_s32;
+    uint8_t imm_mask; /* bit0:u32, bit1:u32_b, bit2:u64, bit3:s32 */
+} Tok;
+
+typedef struct {
+    int start_idx;
+    int end_idx;
+} Range;
+
+typedef enum {
+    LOOP_WH = 1,
+    LOOP_FR = 2
+} LoopType;
+
+typedef struct {
+    LoopType type;
+    int loop_idx;
+    int cond_start_idx;
+    int cond_end_idx;
+    int body_start_idx; /* first token inside body (after B) */
+    int body_end_idx;   /* token index of matching E */
+    int inc_start_idx;  /* FR only: first inc token */
+    int inc_end_idx;    /* FR only: last inc token */
+} LoopInfo;
+
+typedef enum {
+    OT_NONE = 0,
+    OT_U32,
+    OT_U32_U32,
+    OT_U64,
+    OT_JUMP_ORIG,   /* jump with original target index */
+    OT_JUMP_OUT     /* jump with resolved target index */
+} OutOpType;
+
+typedef struct {
+    uint32_t op;
+    OutOpType type;
+    uint32_t u32;
+    uint32_t u32_b;
+    uint64_t u64;
+    int target_orig;
+    int target_out;
+} OutTok;
+
+static bool read_token(const uint8_t* code, int len, int* pc, Tok* out) {
+    if (!code || !pc || !out) return false;
+    int p = *pc;
+    uint32_t op = 0;
+    if (!m_vm_decode_uvarint(code, &p, len, &op)) return false;
+
+    out->op = op;
+    out->start = *pc;
+    out->imm_mask = 0;
+
+    switch (op) {
+        case M_LIT: {
+            uint64_t val = 0;
+            if (!m_vm_decode_uvarint64(code, &p, len, &val)) return false;
+            out->imm_u64 = val;
+            out->imm_mask |= 0x4;
+            break;
+        }
+        case M_V:
+        case M_LET:
+        case M_SET:
+        case M_GTWAY:
+        case M_WAIT:
+        case M_IOW:
+        case M_IOR:
+        case M_TRACE:
+        case M_BP: {
+            uint32_t val = 0;
+            if (!m_vm_decode_uvarint(code, &p, len, &val)) return false;
+            out->imm_u32 = val;
+            out->imm_mask |= 0x1;
+            break;
+        }
+        case M_CL: {
+            uint32_t func_id = 0;
+            uint32_t argc = 0;
+            if (!m_vm_decode_uvarint(code, &p, len, &func_id)) return false;
+            if (!m_vm_decode_uvarint(code, &p, len, &argc)) return false;
+            out->imm_u32 = func_id;
+            out->imm_u32_b = argc;
+            out->imm_mask |= 0x3;
+            break;
+        }
+        case M_JZ:
+        case M_JNZ:
+        case M_JMP:
+        case M_DWHL:
+        case M_WHIL: {
+            int32_t off = 0;
+            if (!m_vm_decode_svarint(code, &p, len, &off)) return false;
+            out->imm_s32 = off;
+            out->imm_mask |= 0x8;
+            break;
+        }
+        default:
+            break;
+    }
+
+    out->end = p;
+    *pc = p;
+    return true;
+}
+
+static int tok_stack_pop(Range* stack, int* sp) {
+    if (*sp < 0) return -1;
+    (*sp)--;
+    return 0;
+}
+
+static Range tok_stack_peek(Range* stack, int sp) {
+    Range r; r.start_idx = -1; r.end_idx = -1;
+    if (sp < 0) return r;
+    return stack[sp];
+}
+
+static bool tok_stack_push(Range* stack, int* sp, int start_idx, int end_idx) {
+    if (*sp + 1 >= STACK_SIZE) return false;
+    (*sp)++;
+    stack[*sp].start_idx = start_idx;
+    stack[*sp].end_idx = end_idx;
+    return true;
+}
+
+static bool tok_stack_dup(Range* stack, int* sp) {
+    if (*sp < 0) return false;
+    if (*sp + 1 >= STACK_SIZE) return false;
+    stack[*sp + 1] = stack[*sp];
+    (*sp)++;
+    return true;
+}
+
+static bool tok_stack_swp(Range* stack, int sp) {
+    if (sp < 1) return false;
+    Range a = stack[sp];
+    Range b = stack[sp - 1];
+    stack[sp] = b;
+    stack[sp - 1] = a;
+    return true;
+}
+
+static bool tok_stack_rot(Range* stack, int sp) {
+    if (sp < 2) return false;
+    Range a = stack[sp - 2];
+    Range b = stack[sp - 1];
+    Range c = stack[sp];
+    stack[sp - 2] = b;
+    stack[sp - 1] = c;
+    stack[sp] = a;
+    return true;
+}
+
+static bool add_outtok(OutTok** out, int* count, int* cap, OutTok t) {
+    if (*count + 1 > *cap) {
+        int new_cap = (*cap == 0) ? 256 : (*cap * 2);
+        OutTok* n = (OutTok*)realloc(*out, (size_t)new_cap * sizeof(OutTok));
+        if (!n) return false;
+        *out = n;
+        *cap = new_cap;
+    }
+    (*out)[(*count)++] = t;
+    return true;
+}
+
+static bool lower_structured(M_VM* v) {
+    if (!v || !v->code || v->code_len <= 0) return false;
+
+    /* Tokenize */
+    Tok* toks = NULL;
+    int tok_cap = 0;
+    int tok_count = 0;
+    int pc = 0;
+    while (pc < v->code_len) {
+        Tok t;
+        if (!read_token(v->code, v->code_len, &pc, &t)) {
+            free(toks);
+            return false;
+        }
+        if (tok_count + 1 > tok_cap) {
+            int new_cap = (tok_cap == 0) ? 256 : tok_cap * 2;
+            Tok* n = (Tok*)realloc(toks, (size_t)new_cap * sizeof(Tok));
+            if (!n) { free(toks); return false; }
+            toks = n;
+            tok_cap = new_cap;
+        }
+        toks[tok_count++] = t;
+    }
+
+    /* Pass 1: identify WH/FR loops using stack-origin ranges */
+    LoopInfo* loops = NULL;
+    int loop_cap = 0;
+    int loop_count = 0;
+    int* loop_at = (int*)malloc((size_t)tok_count * sizeof(int));
+    if (!loop_at) { free(toks); return false; }
+    for (int i = 0; i < tok_count; i++) loop_at[i] = -1;
+
+    Range stack[STACK_SIZE];
+    int sp = -1;
+
+    for (int i = 0; i < tok_count; i++) {
+        uint32_t op = toks[i].op;
+
+        /* Stack effect simulation (linear) */
+        switch (op) {
+            case M_LIT:
+            case M_V:
+            case M_IOR:
+                if (!tok_stack_push(stack, &sp, i, i)) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            case M_LEN:
+            case M_NEG:
+            case M_NOT:
+                if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                if (!tok_stack_push(stack, &sp, i, i)) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            case M_DUP:
+                if (!tok_stack_dup(stack, &sp)) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            case M_DRP:
+                if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            case M_SWP:
+                if (!tok_stack_swp(stack, sp)) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            case M_ROT:
+                if (!tok_stack_rot(stack, sp)) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            case M_GET:
+            case M_IDX: {
+                Range b = tok_stack_peek(stack, sp); if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                Range a = tok_stack_peek(stack, sp); if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                int s = (a.start_idx < b.start_idx) ? a.start_idx : b.start_idx;
+                if (!tok_stack_push(stack, &sp, s, i)) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            }
+            case M_PUT:
+            case M_STO: {
+                Range c = tok_stack_peek(stack, sp); if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                Range b = tok_stack_peek(stack, sp); if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                Range a = tok_stack_peek(stack, sp); if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                int s = a.start_idx;
+                if (b.start_idx < s) s = b.start_idx;
+                if (c.start_idx < s) s = c.start_idx;
+                if (!tok_stack_push(stack, &sp, s, i)) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            }
+            case M_NEWARR:
+            case M_ALLOC: {
+                Range a = tok_stack_peek(stack, sp); if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                if (!tok_stack_push(stack, &sp, a.start_idx, i)) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            }
+            case M_FREE:
+            case M_LET:
+            case M_SET:
+            case M_IOW:
+                if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            case M_ADD: case M_SUB: case M_MUL: case M_DIV:
+            case M_AND: case M_OR: case M_XOR: case M_SHL: case M_SHR:
+            case M_LT:  case M_GT:  case M_LE:  case M_GE:  case M_EQ:  case M_NEQ:
+            case M_MOD: {
+                Range b = tok_stack_peek(stack, sp); if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                Range a = tok_stack_peek(stack, sp); if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                int s = (a.start_idx < b.start_idx) ? a.start_idx : b.start_idx;
+                if (!tok_stack_push(stack, &sp, s, i)) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            }
+            case M_CL: {
+                uint32_t argc = toks[i].imm_u32_b;
+                Range s = { .start_idx = i, .end_idx = i };
+                for (uint32_t k = 0; k < argc; k++) {
+                    Range a = tok_stack_peek(stack, sp);
+                    if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                    if (a.start_idx < s.start_idx) s.start_idx = a.start_idx;
+                }
+                if (!tok_stack_push(stack, &sp, s.start_idx, i)) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            }
+            case M_RT:
+                if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            case M_IF:
+            case M_WH:
+            case M_FR:
+            case M_JZ:
+            case M_JNZ:
+                if (tok_stack_pop(stack, &sp) != 0) { free(toks); free(loop_at); free(loops); return false; }
+                break;
+            default:
+                break;
+        }
+
+        /* Capture WH/FR loop info */
+        if (op == M_WH || op == M_FR) {
+            Range cond = tok_stack_peek(stack, sp + 1); /* cond was popped above for WH/FR */
+            int cond_start = cond.start_idx;
+            int cond_end = cond.end_idx;
+            if (cond_start < 0 || cond_end < 0) { free(toks); free(loop_at); free(loops); return false; }
+            if (i + 1 >= tok_count || toks[i + 1].op != M_B) { free(toks); free(loop_at); free(loops); return false; }
+
+            int depth = 0;
+            int j = i + 1;
+            for (; j < tok_count; j++) {
+                if (toks[j].op == M_B) depth++;
+                else if (toks[j].op == M_E) depth--;
+                if (depth == 0) break;
+            }
+            if (j >= tok_count || toks[j].op != M_E) { free(toks); free(loop_at); free(loops); return false; }
+
+            LoopInfo info;
+            memset(&info, 0, sizeof(info));
+            info.type = (op == M_WH) ? LOOP_WH : LOOP_FR;
+            info.loop_idx = i;
+            info.cond_start_idx = cond_start;
+            info.cond_end_idx = cond_end;
+            info.body_start_idx = i + 2;
+            info.body_end_idx = j;
+            info.inc_start_idx = -1;
+            info.inc_end_idx = -1;
+
+            if (op == M_FR) {
+                int inc_start = cond_end + 1;
+                int inc_end = i - 1;
+                if (inc_start <= inc_end) {
+                    info.inc_start_idx = inc_start;
+                    info.inc_end_idx = inc_end;
+                }
+            }
+
+            if (loop_count + 1 > loop_cap) {
+                int new_cap = (loop_cap == 0) ? 16 : loop_cap * 2;
+                LoopInfo* n = (LoopInfo*)realloc(loops, (size_t)new_cap * sizeof(LoopInfo));
+                if (!n) { free(toks); free(loop_at); free(loops); return false; }
+                loops = n;
+                loop_cap = new_cap;
+            }
+            loops[loop_count] = info;
+            loop_at[i] = loop_count;
+            loop_count++;
+        }
+    }
+
+    if (loop_count == 0) {
+        free(toks);
+        free(loop_at);
+        free(loops);
+        return true; /* nothing to lower */
+    }
+
+    /* Mark tokens to skip (FR inc ranges) */
+    bool* skip = (bool*)calloc((size_t)tok_count, sizeof(bool));
+    if (!skip) { free(toks); free(loop_at); free(loops); return false; }
+    for (int i = 0; i < loop_count; i++) {
+        LoopInfo* li = &loops[i];
+        if (li->type == LOOP_FR && li->inc_start_idx >= 0 && li->inc_end_idx >= li->inc_start_idx) {
+            for (int k = li->inc_start_idx; k <= li->inc_end_idx; k++) {
+                skip[k] = true;
+            }
+        }
+    }
+
+    /* Pass 2: build lowered token list */
+    OutTok* out = NULL;
+    int out_cap = 0;
+    int out_count = 0;
+    int* orig_to_out = (int*)malloc((size_t)tok_count * sizeof(int));
+    if (!orig_to_out) { free(toks); free(loop_at); free(loops); free(skip); return false; }
+    for (int i = 0; i < tok_count; i++) orig_to_out[i] = -1;
+
+    for (int i = 0; i < tok_count; i++) {
+        int li_idx = loop_at[i];
+        if (li_idx >= 0) {
+            LoopInfo* li = &loops[li_idx];
+            int cond_out = orig_to_out[li->cond_start_idx];
+            if (cond_out < 0) { free(toks); free(loop_at); free(loops); free(skip); free(orig_to_out); free(out); return false; }
+
+            /* Emit JZ placeholder */
+            OutTok jz; memset(&jz, 0, sizeof(jz));
+            jz.op = M_JZ;
+            jz.type = OT_JUMP_OUT;
+            int jz_index = out_count;
+            if (!add_outtok(&out, &out_count, &out_cap, jz)) { free(toks); free(loop_at); free(loops); free(skip); free(orig_to_out); free(out); return false; }
+
+            /* Emit body tokens (exclude outer B/E) */
+            for (int k = li->body_start_idx; k < li->body_end_idx; k++) {
+                OutTok ot; memset(&ot, 0, sizeof(ot));
+                ot.op = toks[k].op;
+                if (toks[k].imm_mask & 0x4) { ot.type = OT_U64; ot.u64 = toks[k].imm_u64; }
+                else if ((toks[k].imm_mask & 0x3) == 0x3) { ot.type = OT_U32_U32; ot.u32 = toks[k].imm_u32; ot.u32_b = toks[k].imm_u32_b; }
+                else if (toks[k].imm_mask & 0x1) { ot.type = OT_U32; ot.u32 = toks[k].imm_u32; }
+                else if (toks[k].imm_mask & 0x8) {
+                    ot.type = OT_JUMP_ORIG;
+                    int base = k + 1;
+                    int target = base + toks[k].imm_s32;
+                    ot.target_orig = target;
+                } else {
+                    ot.type = OT_NONE;
+                }
+                if (!add_outtok(&out, &out_count, &out_cap, ot)) { free(toks); free(loop_at); free(loops); free(skip); free(orig_to_out); free(out); return false; }
+                orig_to_out[k] = out_count - 1;
+            }
+
+            /* Emit FR inc tokens after body */
+            if (li->type == LOOP_FR && li->inc_start_idx >= 0 && li->inc_end_idx >= li->inc_start_idx) {
+                for (int k = li->inc_start_idx; k <= li->inc_end_idx; k++) {
+                    OutTok ot; memset(&ot, 0, sizeof(ot));
+                    ot.op = toks[k].op;
+                    if (toks[k].imm_mask & 0x4) { ot.type = OT_U64; ot.u64 = toks[k].imm_u64; }
+                    else if ((toks[k].imm_mask & 0x3) == 0x3) { ot.type = OT_U32_U32; ot.u32 = toks[k].imm_u32; ot.u32_b = toks[k].imm_u32_b; }
+                    else if (toks[k].imm_mask & 0x1) { ot.type = OT_U32; ot.u32 = toks[k].imm_u32; }
+                    else if (toks[k].imm_mask & 0x8) {
+                        ot.type = OT_JUMP_ORIG;
+                        int base = k + 1;
+                        int target = base + toks[k].imm_s32;
+                        ot.target_orig = target;
+                    } else {
+                        ot.type = OT_NONE;
+                    }
+                    if (!add_outtok(&out, &out_count, &out_cap, ot)) { free(toks); free(loop_at); free(loops); free(skip); free(orig_to_out); free(out); return false; }
+                    orig_to_out[k] = out_count - 1;
+                }
+            }
+
+            /* Emit JMP back to cond_start */
+            OutTok jmp; memset(&jmp, 0, sizeof(jmp));
+            jmp.op = M_JMP;
+            jmp.type = OT_JUMP_OUT;
+            jmp.target_out = cond_out;
+            if (!add_outtok(&out, &out_count, &out_cap, jmp)) { free(toks); free(loop_at); free(loops); free(skip); free(orig_to_out); free(out); return false; }
+
+            /* Patch JZ target to next token index */
+            out[jz_index].target_out = out_count;
+
+            i = li->body_end_idx; /* skip to matching E */
+            continue;
+        }
+
+        if (skip[i]) continue;
+
+        OutTok ot; memset(&ot, 0, sizeof(ot));
+        ot.op = toks[i].op;
+        if (toks[i].imm_mask & 0x4) { ot.type = OT_U64; ot.u64 = toks[i].imm_u64; }
+        else if ((toks[i].imm_mask & 0x3) == 0x3) { ot.type = OT_U32_U32; ot.u32 = toks[i].imm_u32; ot.u32_b = toks[i].imm_u32_b; }
+        else if (toks[i].imm_mask & 0x1) { ot.type = OT_U32; ot.u32 = toks[i].imm_u32; }
+        else if (toks[i].imm_mask & 0x8) {
+            ot.type = OT_JUMP_ORIG;
+            int base = i + 1;
+            int target = base + toks[i].imm_s32;
+            ot.target_orig = target;
+        } else {
+            ot.type = OT_NONE;
+        }
+        if (!add_outtok(&out, &out_count, &out_cap, ot)) { free(toks); free(loop_at); free(loops); free(skip); free(orig_to_out); free(out); return false; }
+        orig_to_out[i] = out_count - 1;
+    }
+
+    /* Encode output */
+    uint8_t* new_code = (uint8_t*)malloc((size_t)v->code_len * 4 + 64);
+    if (!new_code) { free(toks); free(loop_at); free(loops); free(skip); free(orig_to_out); free(out); return false; }
+    int new_len = 0;
+
+    for (int i = 0; i < out_count; i++) {
+        OutTok* ot = &out[i];
+        new_len += m_vm_encode_uvarint(ot->op, &new_code[new_len]);
+
+        switch (ot->type) {
+            case OT_U32:
+                new_len += m_vm_encode_uvarint(ot->u32, &new_code[new_len]);
+                break;
+            case OT_U32_U32:
+                new_len += m_vm_encode_uvarint(ot->u32, &new_code[new_len]);
+                new_len += m_vm_encode_uvarint(ot->u32_b, &new_code[new_len]);
+                break;
+            case OT_U64:
+                new_len += m_vm_encode_uvarint64(ot->u64, &new_code[new_len]);
+                break;
+            case OT_JUMP_ORIG: {
+                int target_out = (ot->target_orig >= 0 && ot->target_orig < tok_count) ? orig_to_out[ot->target_orig] : -1;
+                if (target_out < 0) { free(toks); free(loop_at); free(loops); free(skip); free(orig_to_out); free(out); free(new_code); return false; }
+                int offset = target_out - (i + 1);
+                new_len += m_vm_encode_uvarint(m_vm_encode_zigzag(offset), &new_code[new_len]);
+                break;
+            }
+            case OT_JUMP_OUT: {
+                int offset = ot->target_out - (i + 1);
+                new_len += m_vm_encode_uvarint(m_vm_encode_zigzag(offset), &new_code[new_len]);
+                break;
+            }
+            case OT_NONE:
+            default:
+                break;
+        }
+    }
+
+    /* Swap in lowered code */
+    if (v->code_owned) {
+        free(v->code_owned);
+        v->code_owned = NULL;
+    }
+    v->code_owned = new_code;
+    v->code = new_code;
+    v->code_len = new_len;
+
+    free(toks);
+    free(loop_at);
+    free(loops);
+    free(skip);
+    free(orig_to_out);
+    free(out);
+    return true;
+}
 /* =============================================
  * Helper Macros
  * ============================================= */
@@ -273,6 +800,21 @@ static bool build_token_map(M_VM* v) {
 #define TOP(vm) ((vm)->stack[(vm)->sp])
 #define POP(vm) ((vm)->stack[(vm)->sp--])
 #define PUSH(vm, val) do { (vm)->stack[++(vm)->sp] = (val); } while(0)
+
+/* Capability helpers (device_id 0..255) */
+static void caps_clear(M_VM* v) {
+    memset(v->caps, 0, sizeof(v->caps));
+}
+
+static bool caps_has(M_VM* v, uint32_t id) {
+    if (id > 255) return false;
+    return (v->caps[id >> 3] & (uint8_t)(1u << (id & 7))) != 0;
+}
+
+static void caps_add(M_VM* v, uint32_t id) {
+    if (id > 255) return;
+    v->caps[id >> 3] |= (uint8_t)(1u << (id & 7));
+}
 
 /* =============================================
  * Value Operations
@@ -1398,11 +1940,12 @@ static void h_gtway(M_VM* v) {
         SET_FAULT(v, M_FAULT_BAD_ENCODING);
         return;
     }
-    v->authorized = (key == M_GATEWAY_KEY);
     v->pc = pc;
-    if (!v->authorized) {
-        SET_FAULT(v, M_FAULT_UNAUTHORIZED);
+    if (key > 255) {
+        SET_FAULT(v, M_FAULT_BAD_ARG);
+        return;
     }
+    caps_add(v, key);
 }
 
 static void h_wait(M_VM* v) {
@@ -1424,13 +1967,12 @@ static void h_iow(M_VM* v) {
         return;
     }
     NEED(v, 1);
-    if (!v->authorized) {
+    if (!caps_has(v, dev)) {
         SET_FAULT(v, M_FAULT_UNAUTHORIZED);
         return;
     }
     M_Value val = POP(v);
     if (v->io_write) v->io_write((uint8_t)dev, val);
-    v->authorized = false;
     v->pc = pc;
 }
 
@@ -1442,6 +1984,10 @@ static void h_ior(M_VM* v) {
         return;
     }
     SPACE(v, 1);
+    if (!caps_has(v, dev)) {
+        SET_FAULT(v, M_FAULT_UNAUTHORIZED);
+        return;
+    }
     M_Value val = (v->io_read) ? v->io_read((uint8_t)dev) : make_int(0);
     v->pc = pc;
     PUSH(v, val);
@@ -1456,7 +2002,12 @@ static void h_trace(M_VM* v) {
     }
     if (v->trace) {
         char msg[128];
-        snprintf(msg, sizeof(msg), "Trace level %u: sp=%d", (unsigned)level, v->sp);
+        snprintf(msg, sizeof(msg), "Trace level %u: pc=%d op=%s(%u) sp=%d",
+                 (unsigned)level,
+                 v->last_pc,
+                 m_vm_opcode_name(v->last_op),
+                 (unsigned)v->last_op,
+                 v->sp);
         v->trace(level, msg);
     }
     v->pc = pc;
@@ -1630,6 +2181,7 @@ void m_vm_init(M_VM* vm, uint8_t* code, int len,
     vm->running = false;
     vm->authorized = false;
     vm->fault = M_FAULT_NONE;
+    vm->last_pc = -1;
     vm->steps = 0;
     vm->step_limit = MAX_STEPS;
     vm->gas = 0;
@@ -1646,6 +2198,17 @@ void m_vm_init(M_VM* vm, uint8_t* code, int len,
     vm->token_offsets = NULL;
     vm->token_count = 0;
     vm->byte_to_token = NULL;
+    vm->code_owned = NULL;
+    caps_clear(vm);
+    vm->io_write = (void (*)(uint8_t, M_Value))io_w;
+    vm->io_read = (M_Value (*)(uint8_t))io_r;
+    vm->sleep_ms = (void (*)(int32_t))sleep;
+    vm->trace = (void (*)(uint32_t, const char*))trace;
+
+    if (!lower_structured(vm)) {
+        vm->fault = M_FAULT_BAD_ENCODING;
+        return;
+    }
 
     if (!build_token_map(vm)) {
         vm->fault = M_FAULT_BAD_ENCODING;
@@ -1687,6 +2250,7 @@ void m_vm_reset(M_VM* vm) {
     int* token_offsets = vm->token_offsets;
     int token_count = vm->token_count;
     int* byte_to_token = vm->byte_to_token;
+    uint8_t* code_owned = vm->code_owned;
 
     memset(vm, 0, sizeof(M_VM));
     vm->code = code;
@@ -1697,6 +2261,7 @@ void m_vm_reset(M_VM* vm) {
     vm->running = false;
     vm->authorized = false;
     vm->fault = M_FAULT_NONE;
+    vm->last_pc = -1;
     vm->steps = 0;
     vm->step_limit = step_limit;
     vm->gas = 0;
@@ -1711,6 +2276,8 @@ void m_vm_reset(M_VM* vm) {
     vm->token_offsets = token_offsets;
     vm->token_count = token_count;
     vm->byte_to_token = byte_to_token;
+    vm->code_owned = code_owned;
+    caps_clear(vm);
 
     vm->io_write = io_w;
     vm->io_read = io_r;
@@ -1741,6 +2308,7 @@ int m_vm_step(M_VM* vm) {
     }
 
     /* Fetch instruction (always varint) */
+    vm->last_pc = vm->pc;
     if (vm->byte_to_token) {
         vm->last_op_index = (vm->pc >= 0 && vm->pc < vm->code_len) ? vm->byte_to_token[vm->pc] : -1;
         if (vm->last_op_index < 0) {
@@ -1802,9 +2370,11 @@ int m_vm_run(M_VM* vm) {
     memset(vm->globals, 0, sizeof(vm->globals));
     vm->frame_sp = -1;
     vm->fault = M_FAULT_NONE;
+    vm->last_pc = -1;
     vm->steps = 0;
     vm->gas = 0;
     vm->authorized = false;
+    caps_clear(vm);
     vm->running = true;
 
     while (vm->running && vm->pc < vm->code_len) {
@@ -1913,18 +2483,18 @@ const char* m_vm_fault_string(M_Fault fault) {
         case M_FAULT_STACK_UNDERFLOW:     return "STACK_UNDERFLOW";
         case M_FAULT_RET_STACK_OVERFLOW:  return "RET_STACK_OVERFLOW";
         case M_FAULT_RET_STACK_UNDERFLOW: return "RET_STACK_UNDERFLOW";
-        case M_FAULT_LOCALS_OOB:          return "LOCALS_OOB";
-        case M_FAULT_GLOBALS_OOB:         return "GLOBALS_OOB";
+        case M_FAULT_LOCALS_OOB:          return "LOCAL_OOB";
+        case M_FAULT_GLOBALS_OOB:         return "GLOBAL_OOB";
         case M_FAULT_PC_OOB:              return "PC_OOB";
         case M_FAULT_DIV_BY_ZERO:         return "DIV_BY_ZERO";
         case M_FAULT_MOD_BY_ZERO:         return "MOD_BY_ZERO";
-        case M_FAULT_UNKNOWN_OP:          return "UNKNOWN_OP";
+        case M_FAULT_UNKNOWN_OP:          return "BAD_OPCODE";
         case M_FAULT_STEP_LIMIT:          return "STEP_LIMIT";
-        case M_FAULT_GAS_EXHAUSTED:       return "GAS_EXHAUSTED";
-        case M_FAULT_BAD_ENCODING:        return "BAD_ENCODING";
-        case M_FAULT_UNAUTHORIZED:        return "UNAUTHORIZED";
+        case M_FAULT_GAS_EXHAUSTED:       return "GAS_LIMIT";
+        case M_FAULT_BAD_ENCODING:        return "BAD_VARINT";
+        case M_FAULT_UNAUTHORIZED:        return "UNAUTHORIZED_IO";
         case M_FAULT_TYPE_MISMATCH:       return "TYPE_MISMATCH";
-        case M_FAULT_INDEX_OOB:           return "INDEX_OOB";
+        case M_FAULT_INDEX_OOB:           return "ARRAY_OOB";
         case M_FAULT_BAD_ARG:             return "BAD_ARG";
         case M_FAULT_OOM:                 return "OOM";
         case M_FAULT_ASSERT_FAILED:       return "ASSERT_FAILED";
@@ -2056,5 +2626,9 @@ void m_vm_destroy(M_VM* vm) {
         vm->byte_to_token = NULL;
     }
     vm->token_count = 0;
+    if (vm->code_owned) {
+        free(vm->code_owned);
+        vm->code_owned = NULL;
+    }
 }
 

@@ -17,6 +17,7 @@ void m_validator_result_init(M_ValidatorResult* result);
 
 /* Main validation entry point */
 M_ValidatorResult m_validate(const uint8_t* code, int len);
+M_ValidatorResult m_validate_core_only(const uint8_t* code, int len);
 
 /* Individual validation checks */
 bool m_validate_opcodes(const uint8_t* code, int len, M_ValidatorResult* result);
