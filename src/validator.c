@@ -286,6 +286,81 @@ static bool validate_range(ValTok* toks, int count, int start, int end,
     return true;
 }
 
+static bool validate_reachability(ValTok* toks, int count, M_ValidatorResult* result) {
+    if (count <= 0) return true;
+
+    bool* reachable = (bool*)calloc((size_t)count, sizeof(bool));
+    int* queue = (int*)malloc((size_t)count * sizeof(int));
+    if (!reachable || !queue) {
+        free(reachable);
+        free(queue);
+        set_result(result, false, M_FAULT_OOM, 0, "Reachability allocation failed");
+        return false;
+    }
+
+    int qh = 0, qt = 0;
+    reachable[0] = true;
+    queue[qt++] = 0;
+
+    while (qh < qt) {
+        int i = queue[qh++];
+        uint32_t op = toks[i].op;
+
+#define ENQUEUE(idx) do { \
+    int _idx = (idx); \
+    if (_idx >= 0 && _idx < count && !reachable[_idx]) { \
+        reachable[_idx] = true; \
+        queue[qt++] = _idx; \
+    } \
+} while(0)
+
+        if (op == M_JMP) {
+            int target = (i + 1) + toks[i].s32;
+            if (target < 0 || target >= count) {
+                set_result(result, false, M_FAULT_PC_OOB, toks[i].start, "Jump target out of bounds");
+                free(reachable);
+                free(queue);
+                return false;
+            }
+            ENQUEUE(target);
+            continue;
+        }
+
+        if (op == M_JZ || op == M_JNZ || op == M_DWHL || op == M_WHIL) {
+            int target = (i + 1) + toks[i].s32;
+            if (target < 0 || target >= count) {
+                set_result(result, false, M_FAULT_PC_OOB, toks[i].start, "Jump target out of bounds");
+                free(reachable);
+                free(queue);
+                return false;
+            }
+            ENQUEUE(target);
+            ENQUEUE(i + 1);
+            continue;
+        }
+
+        if (op == M_HALT || op == M_RT) {
+            continue;
+        }
+
+        ENQUEUE(i + 1);
+    }
+#undef ENQUEUE
+
+    for (int i = 0; i < count; i++) {
+        if (!reachable[i]) {
+            set_result(result, false, M_FAULT_BAD_ARG, toks[i].start, "Unreachable code");
+            free(reachable);
+            free(queue);
+            return false;
+        }
+    }
+
+    free(reachable);
+    free(queue);
+    return true;
+}
+
 bool m_validate_opcodes(const uint8_t* code, int len, M_ValidatorResult* result) {
     int pc = 0;
     
@@ -537,6 +612,10 @@ M_ValidatorResult m_validate(const uint8_t* code, int len) {
     int sp = 0;
     uint8_t caps[32] = {0};
     if (!validate_range(toks, tok_count, 0, tok_count, &sp, caps, &result)) {
+        free(toks);
+        return result;
+    }
+    if (!validate_reachability(toks, tok_count, &result)) {
         free(toks);
         return result;
     }

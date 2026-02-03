@@ -955,58 +955,71 @@ void m_vm_set_gc_threshold(M_VM* v, int threshold) {
 }
 
 /* Mark a value as reachable during GC */
-static void gc_mark_value(M_VM* v, M_Value val, AllocNode** marked, int* marked_count) {
-    if (val.type != M_TYPE_REF || val.u.ref == NULL) {
+static void gc_mark_value(M_VM* v, M_Value val, AllocNode** marked, int* marked_count, int marked_cap) {
+    void* ptr = NULL;
+    if (val.type == M_TYPE_REF) {
+        ptr = val.u.ref;
+    } else if (val.type == M_TYPE_ARRAY) {
+        ptr = val.u.array_ptr;
+    } else {
         return;
     }
-    
+
+    if (ptr == NULL) return;
+    if (*marked_count >= marked_cap) return;
+
     /* Check if already marked */
     for (int i = 0; i < *marked_count; i++) {
-        if (marked[i]->ptr == val.u.ref) {
+        if (marked[i]->ptr == ptr) {
             return;
         }
     }
-    
+
     /* Find and mark this allocation */
     AllocNode* node = v->alloc_head;
     while (node) {
-        if (node->ptr == val.u.ref) {
-            /* Mark as reachable */
+        if (node->ptr == ptr) {
             marked[*marked_count] = node;
             (*marked_count)++;
-            
-            /* For now, we only track direct pointers.
-             * In a full implementation, we'd traverse structures. */
-            return;
+            break;
         }
         node = node->next;
+    }
+
+    /* If this is an array, traverse its elements */
+    if (val.type == M_TYPE_ARRAY && val.u.array_ptr != NULL) {
+        M_Array* arr = val.u.array_ptr;
+        for (int64_t i = 0; i < arr->len; i++) {
+            if (*marked_count >= marked_cap) return;
+            gc_mark_value(v, arr->data[i], marked, marked_count, marked_cap);
+        }
     }
 }
 
 /* Mark all reachable values from stacks and locals */
-static void gc_mark_all(M_VM* v, AllocNode** marked, int* marked_count) {
+static void gc_mark_all(M_VM* v, AllocNode** marked, int* marked_count, int marked_cap) {
     /* Mark stack values */
     for (int i = 0; i <= v->sp; i++) {
-        gc_mark_value(v, v->stack[i], marked, marked_count);
+        gc_mark_value(v, v->stack[i], marked, marked_count, marked_cap);
     }
     
     /* Mark return stack (addresses are not refs, skip) */
     
     /* Mark locals */
     for (int i = 0; i < LOCALS_SIZE; i++) {
-        gc_mark_value(v, v->locals[i], marked, marked_count);
+        gc_mark_value(v, v->locals[i], marked, marked_count, marked_cap);
     }
     
     /* Mark locals frames */
     for (int f = 0; f <= v->frame_sp; f++) {
         for (int i = 0; i < LOCALS_SIZE; i++) {
-            gc_mark_value(v, v->locals_frames[f][i], marked, marked_count);
+            gc_mark_value(v, v->locals_frames[f][i], marked, marked_count, marked_cap);
         }
     }
     
     /* Mark globals */
     for (int i = 0; i < GLOBALS_SIZE; i++) {
-        gc_mark_value(v, v->globals[i], marked, marked_count);
+        gc_mark_value(v, v->globals[i], marked, marked_count, marked_cap);
     }
 }
 
@@ -1032,7 +1045,7 @@ void m_vm_gc(M_VM* v) {
     int marked_count = 0;
     
     /* Mark all reachable values */
-    gc_mark_all(v, marked, &marked_count);
+    gc_mark_all(v, marked, &marked_count, alloc_count);
     
     /* Sweep unreachable allocations */
     AllocNode** p = &v->alloc_head;
