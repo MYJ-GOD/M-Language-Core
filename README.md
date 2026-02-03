@@ -24,20 +24,20 @@ M 语言是一个三层架构的 AI-硬件通信协议：
 ```
 M-Language-Core/
 ├── Core/           # MVM 虚拟机核心（C 语言）
-│   ├── include/    # 头文件
-│   ├── src/       # 源码
-│   └── README.md
-├── MCP/           # MCP Server（Python）
-│   ├── server.py  # MCP Server 主程序
-│   ├── skills.py  # Skills 实现
-│   └── README.md
-├── Examples/      # 使用示例
+│   ├── include/    # 头文件 (m_vm.h, disasm.h, validator.h)
+│   └── src/        # 源码 (m_vm.c, disasm.c, main.c, validator.c)
+├── MCP/            # MCP Server（Python）
+│   ├── server.py   # MCP Server 主程序
+│   ├── skills.py   # 3 个核心 Skills 实现
+│   ├── protocol.md # 串口通信协议
+│   └── requirements.txt
+├── Examples/       # 使用示例
 │   └── 01_water_level_demo/
-├── Docs/         # 规范文档
-│   ├── M-Token规范.md
-│   ├── mcp和skills.md
-│   └── README.md
-└── README.md     # 本文件
+├── Docs/           # 规范文档
+│   ├── M-Token规范.md      # 指令集完整参考
+│   ├── mcp和skills.md      # AI 接入规范
+│   └── M语言体系完整大纲.md # 三层架构说明
+└── README.md       # 本文件
 ```
 
 ## 快速开始
@@ -46,10 +46,10 @@ M-Language-Core/
 
 ```bash
 # Windows (Visual Studio)
-MSBuild.exe Core/M-Language-Core.sln /p:Configuration=Debug /p:Platform=x64
+MSBuild.exe M-Language-Core.sln /p:Configuration=Debug /p:Platform=x64
 
 # Linux/macOS
-gcc -o mvm Core/src/m_vm.c Core/src/disasm.c Core/src/main.c Core/src/validator.c -I Core/include -O2
+gcc -o mvm src/m_vm.c src/disasm.c src/main.c src/validator.c -I include -O2
 ```
 
 ### 2. 运行测试
@@ -68,13 +68,40 @@ python server.py --port COM3
 
 ## 文档
 
-- [M-Token 规范](./Docs/M-Token规范.md) - 指令集完整参考
-- [MCP & Skills](./Docs/mcp和skills.md) - AI 接入规范
-- [架构概述](./Docs/M语言体系完整大纲.md) - 三层架构说明
+| 文件 | 描述 |
+|------|------|
+| [Docs/M-Token规范.md](./Docs/M-Token规范.md) | 指令集完整参考 |
+| [Docs/mcp和skills.md](./Docs/mcp和skills.md) | AI 接入规范 |
+| [Docs/M语言体系完整大纲.md](./Docs/M语言体系完整大纲.md) | 三层架构说明 |
 
 ## 示例
 
-- [水位监控示例](./Examples/01_water_level_demo/) - 完整业务场景
+| 示例 | 描述 |
+|------|------|
+| [Examples/01_water_level_demo/](./Examples/01_water_level_demo/) | 水位监控完整场景 |
+
+## 核心组件
+
+### Core (MVM 虚拟机)
+
+栈机架构，执行 M-Token 字节码：
+- `include/m_vm.h` - VM 数据结构、opcode 定义
+- `src/m_vm.c` - VM 核心实现
+- `src/validator.c` - 静态验证器
+- `src/disasm.c` - 反汇编器
+
+### MCP (Python Server)
+
+AI 与硬件的桥梁：
+- `server.py` - MCP Server 主程序
+- `skills.py` - 3 个核心 Skills
+- `protocol.md` - 串口通信协议
+
+### Examples (使用示例)
+
+AI 提示词 + 预期 Token 输出：
+- `system_prompt.txt` - AI 提示词
+- `*.json` - 预期 M-Token + 验证数据
 
 ## 许可证
 
