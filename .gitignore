@@ -125,3 +125,12 @@ DocumentLayout*.json
 
 # Visual Studio extension index files
 *.vsidx
+
+# Python runtime caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Runtime data (logs/cache/db)
+data/**
+!data/.gitkeep
