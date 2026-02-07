@@ -1,7 +1,0 @@
-{
-  "description": "读取水位计值",
-  "tokens": [30, 1, 71, 82],
-  "expected_stack": [520],
-  "bytecode_hex": "1e014752"
-}
-

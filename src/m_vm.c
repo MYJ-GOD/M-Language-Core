@@ -2062,10 +2062,7 @@ static const uint32_t GAS_COST[256] = {
     [M_GET]    = 2,
     [M_PUT]    = 3,
     [M_SWP]    = 1,
-    [M_GET_ALIAS] = 2,   /* Legacy alias */
-    [M_PUT_ALIAS] = 3,   /* Legacy alias */
-    [M_SWP_ALIAS] = 1,   /* Legacy alias */
-    [M_ALLOC]  = 5,      /* Memory allocation */
+    /* Memory allocation */
     [M_FREE]   = 2,      /* Memory free */
     [M_NEWARR] = 5,
     [M_IDX]    = 2,
@@ -2087,8 +2084,6 @@ static const uint32_t GAS_COST[256] = {
     [M_GC]     = 10,    /* GC costs more (scans all memory) */
     [M_BP]     = 1,
     [M_STEP]   = 0,
-    [M_ALLOC]  = 5,     /* Platform extension */
-    [M_FREE]   = 2,
     /* Extension instructions (100-199) */
     [M_JZ]     = 1,
     [M_JNZ]    = 1,     /* Jump if not zero */
@@ -2132,15 +2127,12 @@ static const handler TABLE[256] = {
     [M_DUP]    = h_dup,
     [M_DRP]    = h_drp,
     [M_ROT]    = h_rot,
-    /* Array operations - both规范 defined (61-63) and legacy (67-69) */
+    /* Array operations (60-63) */
     [M_LEN]    = h_len,
     [M_GET]    = h_get,
     [M_PUT]    = h_put,
     [M_SWP]    = h_swp,
-    [M_GET_ALIAS] = h_get,   /* Legacy alias for backward compatibility */
-    [M_PUT_ALIAS] = h_put,   /* Legacy alias for backward compatibility */
-    [M_SWP_ALIAS] = h_swp,   /* Legacy alias for backward compatibility */
-    /* Legacy array operations (moved to Extension range for clarity) */
+    /* Array operations Extension (120-122) */
     [M_NEWARR] = h_newarr,
     [M_IDX]    = h_idx,
     [M_STO]    = h_sto,
@@ -2173,7 +2165,7 @@ static const handler TABLE[256] = {
     [M_NEG]    = h_neg,   /* Negate */
     [M_NOT]    = h_not,   /* Bitwise NOT */
     [M_NEQ]    = h_neq,   /* Not equal - moved to Extension 113 */
-    /* Extension loop constructs (legacy, superseded by Core WH) */
+    /* NOT ABI - Internal IR for loop lowering only */
     [M_DWHL]   = h_dwhl,
     [M_DO]     = h_do,
     [M_WHIL]   = h_whil
@@ -2560,16 +2552,13 @@ const char* m_vm_opcode_name(uint32_t op) {
         case M_DRP:  return "DRP";
         case M_ROT:  return "ROT";
 
-        /* Array operations -规范 defined (61-63) */
+        /* Array operations (60-63) */
         case M_LEN:  return "LEN";
         case M_GET:  return "GET";
         case M_PUT:  return "PUT";
         case M_SWP:  return "SWP";
 
-        /* Legacy array operations (for backward compatibility) */
-        case M_GET_ALIAS:  return "GET";
-        case M_PUT_ALIAS:  return "PUT";
-        case M_SWP_ALIAS:  return "SWP";
+        /* Array operations Extension (120-122) */
         case M_NEWARR:     return "NEWARR";
         case M_IDX:        return "IDX";
         case M_STO:        return "STO";
@@ -2602,7 +2591,7 @@ const char* m_vm_opcode_name(uint32_t op) {
         case M_NOT:  return "NOT";   /* Extension - 112 */
         case M_NEQ:  return "NEQ";   /* Extension - 113 (was 45) */
 
-        /* Extension loop constructs */
+        /* NOT ABI - Internal IR for loop lowering only */
         case M_DO:   return "DO";
         case M_DWHL: return "DWHL";
         case M_WHIL: return "WHILE";

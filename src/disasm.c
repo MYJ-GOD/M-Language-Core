@@ -92,6 +92,7 @@ static bool disasm_skip_operands(const uint8_t* code, int len, uint32_t op, int*
         case M_JZ:
         case M_JNZ:
         case M_JMP:
+        /* NOT ABI - Internal IR for loop lowering */
         case M_DWHL:
         case M_WHIL: {
             int32_t off = 0;
@@ -373,7 +374,7 @@ static void disasm_scan_labels(DisasmContext* ctx) {
                 /* PH (placeholder) has no operands - it's just for alignment/padding */
                 break;
             case M_DWHL: {
-                /* DWHL,<offset> - do-while loop end (opcode index offset) */
+                /* DWHL,<offset> - NOT ABI, Internal IR for do-while */
                 int32_t offset = 0;
                 int pc2 = pc;
                 if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
@@ -385,12 +386,12 @@ static void disasm_scan_labels(DisasmContext* ctx) {
                         snprintf(name, sizeof(name), "L%d", target);
                         disasm_add_label(ctx, target, name, LABEL_JUMP_IN);
                     }
-                    pc = pc2;  /* IMPORTANT: advance PC past the offset */
+                    pc = pc2;
                 }
                 break;
             }
             case M_WHIL: {
-                /* WHILE,<offset> - while loop (opcode index offset) */
+                /* WHILE,<offset> - NOT ABI, Internal IR for while */
                 int32_t offset = 0;
                 int pc2 = pc;
                 if (m_vm_decode_svarint(ctx->code, &pc2, ctx->len, &offset)) {
@@ -418,10 +419,11 @@ static void disasm_scan_labels(DisasmContext* ctx) {
             case M_ROT:
             case M_RT:
             case M_E:
-            case M_FREE:
             case M_ALLOC:
+            case M_FREE:
+            /* NOT ABI - Internal IR */
             case M_DO:
-                /* These instructions have no operands */
+                /* No operands */
                 break;
             default:
                 break;
@@ -681,7 +683,8 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
             }
             break;
         }
-        
+
+        /* NOT ABI - Internal IR for loop lowering */
         case M_DWHL: {
             int32_t offset = 0;
             int pc2 = *next_pc;
@@ -700,7 +703,7 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
             }
             break;
         }
-        
+
         case M_WHIL: {
             int32_t offset = 0;
             int pc2 = *next_pc;
@@ -720,7 +723,7 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
             }
             break;
         }
-        
+
         case M_FN: {
             uint32_t arity = 0;
             int after_pc = *next_pc;
@@ -741,11 +744,12 @@ static void disasm_one_instruction(DisasmContext* ctx, int pc, int* next_pc) {
             ctx->indent--;
             disasm_printf(ctx, "; block end");
             break;
-        
+
+        /* NOT ABI - Internal IR for loop lowering */
         case M_DO:
-            disasm_printf(ctx, "; do { body } while");
+            disasm_printf(ctx, "; do { body } while (NOT ABI)");
             break;
-        
+
         /* System ops */
         case M_GTWAY: {
             uint32_t key = 0;

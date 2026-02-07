@@ -32,64 +32,100 @@ Opcode	名称	语法
 16	RT	RT,<value>
 17	CL	CL,<func_id>,<argc>,<arg...>
 18	PH	placeholder
-3.2 数据与变量（30–33）
-Opcode	名称	行为
-30	LIT	push literal
-31	V	read local (DeBruijn index)
-32	LET	write local
-33	SET	write global
-3.3 比较（40–44）
 
-LT / GT / LE / GE / EQ
+3.2 数据与变量（30–33）
+Opcode	名称	参数	行为
+30	LIT	<value>	将字面量推入栈
+31	V	<index>	读取局部变量（DeBruijn index）
+32	LET	<index>,<value>	写入局部变量
+33	SET	<name_id>,<value>	写入全局变量
+
+3.3 比较（40–44）
+Opcode	名称	栈行为
+40	LT	a,b → a<b (1:true, 0:false)
+41	GT	a,b → a>b (1:true, 0:false)
+42	LE	a,b → a<=b (1:true, 0:false)
+43	GE	a,b → a>=b (1:true, 0:false)
+44	EQ	a,b → a==b (1:true, 0:false)
 
 3.4 算术 / 位运算（50–58）
-Opcode	名称
-50	ADD
-51	SUB
-52	MUL
-53	DIV
-54	AND
-55	OR
-56	XOR
-57	SHL
-58	SHR
+Opcode	名称	栈行为
+50	ADD	a,b → a+b
+51	SUB	a,b → a-b
+52	MUL	a,b → a*b
+53	DIV	a,b → a/b
+54	AND	a,b → a&b
+55	OR	a,b → a|b
+56	XOR	a,b → a^b
+57	SHL	a,b → a<<b
+58	SHR	a,b → a>>b
+
 3.5 数组（60–63）
 Opcode	名称	栈行为
-60	LEN	arr → len
-61	GET	arr,idx → val
-62	PUT	arr,idx,val → arr
-63	SWP	a,b → b,a
-3.6 栈操作（64–66）
+60	LEN	<array_ref> → <length>
+61	GET	<array_ref>,<index> → <element>
+62	PUT	<array_ref>,<index>,<value> → <array_ref>
+63	SWP	<a>,<b> → <b>,<a>
 
-DUP / DRP / ROT
+3.6 栈操作（64–66）
+Opcode	名称	栈行为
+64	DUP	<a> → <a>,<a>	（复制栈顶）
+65	DRP	<a> → （丢弃栈顶）
+66	ROT	<a>,<b>,<c> → <b>,<c>,<a>	（旋转栈顶3个）
 
 3.7 硬件 IO（70–71）
-Opcode	名称
-70	IOW
-71	IOR
+重要：所有 IO 操作必须先用 GTWAY 授权，否则会返回 UNAUTHORIZED 错误。
+
+Opcode	名称	参数	栈行为	说明
+70	IOW	<device_id>,<value>	<value>,<device_id> → （弹出2个）	写入设备
+71	IOR	<device_id>	（弹出1个）→ <value>	读取设备
+
+设备 ID 列表（平台相关）：
+| device_id | 类型   | 名称         | 说明               |
+|-----------|--------|--------------|--------------------|
+| 1         | SENSOR | Water_Level  | 水位传感器 (A0)    |
+| 2         | SENSOR | DHT11_Temp   | 温度传感器 (D4)    |
+| 3         | SENSOR | DHT11_Humidity| 湿度传感器 (D4)  |
+| 5         | ACTUATOR | Relay_1   | 继电器1 (D1)       |
+| 6         | ACTUATOR | Relay_2   | 继电器2 (D2)       |
+
 3.8 系统（80–83）
-Opcode	名称
-80	GTWAY
-81	WAIT
-82	HALT
-83	TRACE
+Opcode	名称	参数	行为
+80	GTWAY	<cap_id>	将 capability 加入当前执行会话
+81	WAIT	<milliseconds>	延迟指定毫秒数
+82	HALT		正常终止执行
+83	TRACE	<level>	调试跟踪（不产生 IO 副作用）
+
+3.9 内存管理（200–201，平台扩展）
+Opcode	名称	栈行为	说明
+200	ALLOC	<size> → <ptr>	在堆上分配内存
+201	FREE	<ptr> →	释放之前分配的内存
+
+注：仅在支持堆分配的平台可用。
+
 4. Extension / IR 指令（100–199）
 4.1 跳转（低级控制流）
 Opcode	名称	参数
-100	JMP	svarint offset
-101	JZ	svarint offset
-102	JNZ	svarint offset
-4.2 算术扩展
+100	JMP	<svarint offset>
+101	JZ	<svarint offset>
+102	JNZ	<svarint offset>
 
-MOD / NEG / NOT
+4.2 算术扩展
+Opcode	名称	栈行为
+110	MOD	a,b → a%b
+111	NEG	<a> → <-a>
+112	NOT	<a> → <~a>
+113	NEQ	a,b → a!=b (1:true, 0:false)
 
 4.3 数组 / 内存扩展
-
-NEWARR / IDX / STO
+120	NEWARR	<size> → <array_ref>
+121	IDX	<array_ref>,<index> → <element>
+122	STO	<array_ref>,<index>,<value> → <array_ref>
 
 4.4 调试 / 执行控制
-
-GC / BP / STEP
+130	GC		垃圾回收
+131	BP	<id>	断点
+132	STEP		单步执行
 
 5. 值与类型语义（Value Model）
 
@@ -162,16 +198,74 @@ GTWAY,<cap_id> 将 capability 加入当前执行会话
 
 IOW / IOR 执行前必须验证 capability
 
-capability 默认按 device_id 授权
+capability 默认按 device_id 授权（cap_id = device_id）
 
 未授权 IO → trap
 
 授权仅在当前执行会话内有效
 
-10. Fault / Trap 模型
-10.1 常见 Fault 类型
+10. 完整示例
 
-STACK_UNDERFLOW / STACK_OVERFLOW
+10.1 读取水位传感器
+```m-token
+[80, 1, 30, 1, 71, 1, 82]
+```
+解码：
+| Token  | 含义           |
+|--------|----------------|
+| 80     | GTWAY          |
+| 1      | cap_id=1       |
+| 30     | LIT            |
+| 1      | value=1        |
+| 71     | IOR            |
+| 1      | device_id=1    |
+| 82     | HALT           |
+
+栈操作：push(1) → IOR(1) → pop → result
+
+10.2 打开继电器1
+```m-token
+[80, 5, 30, 1, 70, 5, 82]
+```
+解码：
+| Token  | 含义           |
+|--------|----------------|
+| 80     | GTWAY          |
+| 5      | cap_id=5       |
+| 30     | LIT            |
+| 1      | value=1        |
+| 70     | IOW            |
+| 5      | device_id=5    |
+| 82     | HALT           |
+
+10.3 关闭继电器2
+```m-token
+[80, 6, 30, 0, 70, 6, 82]
+```
+
+10.4 读取温度并判断
+```m-token
+[80, 2, 30, 1, 71, 2, 30, 30, 44, 82]
+```
+解码：
+| Token | 含义           |
+|-------|----------------|
+| 80    | GTWAY          |
+| 2     | cap_id=2       |
+| 30    | LIT            |
+| 1     | cap_id=1       |
+| 71    | IOR            |
+| 2     | device_id=2    |
+| 30    | LIT            |
+| 30    | value=30       |
+| 44    | EQ (==)        |
+| 82    | HALT           |
+结果：1 (true) 如果温度 == 30，否则 0 (false)
+
+11. Fault / Trap 模型
+11.1 常见 Fault 类型
+
+STACK_OVERFLOW / STACK_UNDERFLOW
 
 BAD_OPCODE / BAD_VARINT
 
@@ -185,9 +279,11 @@ ARRAY_OOB
 
 STEP_LIMIT / GAS_LIMIT
 
-UNAUTHORIZED_IO
+UNAUTHORIZED_IO（IO 未授权）
 
-10.2 Trap 行为
+UNKNOWN_OP（未知 opcode）
+
+11.2 Trap 行为
 
 立即停止执行
 
@@ -195,7 +291,7 @@ UNAUTHORIZED_IO
 
 HALT 为正常终止，fault 为异常终止
 
-11. Static Validation（验证器规范）
+12. Static Validation（验证器规范）
 
 验证器 必须拒绝执行 不合法字节码，至少检查：
 
@@ -213,9 +309,9 @@ IF/WH/FR 结构正确
 
 locals / globals 访问合法
 
-IO 操作具备授权
+IO 操作具备授权（前面必须有对应的 GTWAY）
 
-12. Gas 与执行限制
+13. Gas 与执行限制
 
 VM 必须支持 step_limit
 
@@ -225,7 +321,7 @@ gas 为平台无关固定表
 
 gas 用尽 → trap
 
-13. TRACE 与调试
+14. TRACE 与调试
 
 TRACE,<level> 不得影响程序语义
 
@@ -235,7 +331,7 @@ TRACE,<level> 不得影响程序语义
 
 TRACE 不得产生 IO 副作用
 
-14. 确定性
+15. 确定性
 
 Core 指令必须确定性
 
@@ -243,7 +339,7 @@ Core 指令必须确定性
 
 同字节码 + 同输入 → 同结果
 
-15. 约束
+16. 约束
 
 Core 指令编号 永不重定义
 
@@ -253,7 +349,7 @@ Core 结构化指令 可 lowering 为 IR
 
 lowering 不得改变可观测语义（IO / TRACE）
 
-16. 合法性
+17. 合法性
 
 一段 M-Token 程序是合法的，当且仅当：
 

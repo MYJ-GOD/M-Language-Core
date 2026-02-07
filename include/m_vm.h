@@ -35,9 +35,9 @@
 #define M_JNZ  102  /* Jump if not zero: <cond>,JNZ,<svarint offset> (Extension) */
 
 /* --- Extension Loop Constructs (NOT ABI - for lowering only) --- */
-#define M_DO    140 /* Do-while loop begin: DO,<body>,WHILE,<cond> (Extension - NOT ABI) */
-#define M_DWHL  141 /* Do-while loop end (jump back if cond true) (Extension - NOT ABI) */
-#define M_WHIL  142 /* While loop: <cond>,WHILE,<offset> (Extension - NOT ABI, use Core WH) */
+#define M_DO    140 /* DO,<body>,WHILE,<cond> (Internal IR - NOT ABI) */
+#define M_DWHL  141 /* Jump back if cond true (Internal IR - NOT ABI) */
+#define M_WHIL  142 /* While loop IR (Internal IR - NOT ABI, use Core WH) */
 
 /* --- Data Operations (30-39) --- */
 #define M_LIT  30   /* Literal: LIT,<varint|dict_id> */
