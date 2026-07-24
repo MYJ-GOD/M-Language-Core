@@ -1,4 +1,4 @@
-﻿# MCP 和 Skills 规范（当前实现）
+# MCP 和 Skills 规范（当前实现）
 
 ## 1. 分层原则
 
@@ -25,10 +25,24 @@
 
 ### 2.2 写操作工具（Write）
 - `relay_set_mcp`
+- `relay_set_with_verify_mcp`
 - `relay_all_off_mcp`
 - `run_safety_control_mcp`
 - `reset_guard_mcp`
 - `execute_m_logic_mcp`（低层调试能力，建议受限使用）
+
+### 2.3 M-IR 编译链
+- `execute_lir_mcp`：纯模拟、零副作用（验证 M-IR 编译 + 模拟）
+- `execute_lir_action_mcp`：真实文件写入（沙箱 + 路径穿越拦截）
+
+链路：LLM 生成 M-IR → `compiler.compile_source()` → M-Token 字节码 → `simulator.simulate_subset()` → 结果
+
+### 2.4 闭环/实验类
+- `read_relay_state_mcp`
+- `run_relay_closed_loop_skill_mcp`
+- `set_fault_injection_mcp`
+- `get_fault_injection_status_mcp`
+- `run_experiment_batch_mcp`
 
 ## 3. Skills 入口（工作流）
 
@@ -38,6 +52,8 @@
   - 环境评估：快照 + 阈值告警
 - `run_safe_control_skill_mcp`
   - 安全控制：auto/emergency_stop/pulse
+- `run_relay_closed_loop_skill_mcp`
+  - 继电器闭环：写入 + 回读 + 必要时安全回退
 
 ## 4. 安全策略
 
@@ -45,6 +61,8 @@
 - 继电器持续开启受时长上限保护（`MCP_RELAY_MAX_DURATION_SEC`）。
 - 熔断保护：连续失败后进入冷却期，返回 `CIRCUIT_OPEN`。
 - 审计落盘：每次工具调用写入 `data/mcp/audit.jsonl`。
+- M-IR 沙箱：文件写入限定在 `MCP_LIR_FILE_ROOT` 内，路径穿越拦截。
+- 参数隔离：真实路径/内容来自服务端受信配置（`MCP_LIR_BINDINGS`），不来自 LLM。
 
 ## 5. 关键环境变量
 
@@ -55,6 +73,8 @@
 - `MCP_READ_RETRY_COUNT`
 - `MCP_WRITE_RETRY_COUNT`
 - `MCP_AUDIT_DIR`
+- `MCP_LIR_FILE_ROOT`（M-IR 文件槽沙箱根目录）
+- `MCP_LIR_BINDINGS`（M-IR 槽位→资源绑定 JSON）
 
 ## 6. 开发约定
 
@@ -72,3 +92,4 @@
 3. `run_environment_skill_mcp`
 4. `run_safe_control_skill_mcp`（先 `strategy=auto`，再按需 `pulse`）
 5. 失败时用 `get_guard_status_mcp` + `get_recent_audit_events_mcp` 排查
+6. M-IR 编译链：`python -m pytest test_lir_backend.py -v`

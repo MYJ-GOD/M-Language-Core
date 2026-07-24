@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
@@ -18,6 +18,8 @@ class SkillEngine:
     threshold_eval: ToolFn
     safety_control: ToolFn
     relay_all_off: ToolFn
+    relay_set_with_verify: ToolFn
+    read_relay_state: ToolFn
 
     def run_patrol_skill(
         self,
@@ -33,11 +35,11 @@ class SkillEngine:
 
         health_level = str(health.get("overall_health", "degraded"))
         if health_level == "ok":
-            summary = "巡检通过，系统状态正常。"
+            summary = "Patrol passed and system is healthy."
         elif health_level == "degraded":
-            summary = "巡检通过但有退化项，建议尽快处理告警。"
+            summary = "Patrol passed with warnings; maintenance is recommended."
         else:
-            summary = "巡检失败，建议先执行安全回落并排查硬件链路。"
+            summary = "Patrol failed; run safe fallback and inspect hardware chain."
 
         return {
             "status": "success",
@@ -51,9 +53,9 @@ class SkillEngine:
                 "events": recent.get("events", []),
             },
             "next_steps": [
-                "若 overall_health=failed，先执行 relay_all_off_mcp。",
-                "若 open_circuit_count>0，执行 reset_guard_mcp 后复测。",
-                "若温湿度长期为 0，检查 DHT 供电与数据线。",
+                "If overall_health=failed, run relay_all_off_mcp first.",
+                "If open circuits exist, run reset_guard_mcp and retest.",
+                "If temperature/humidity readings stay invalid, inspect DHT wiring and power.",
             ],
         }
 
@@ -67,11 +69,11 @@ class SkillEngine:
 
         level = str(eval_result.get("overall_level", "WARN")) if eval_result.get("status") == "success" else "WARN"
         if level == "CRITICAL":
-            summary = "环境处于 CRITICAL，建议立即执行安全联动。"
+            summary = "Environment is CRITICAL; execute safety action immediately."
         elif level == "WARN":
-            summary = "环境处于 WARN，建议提高采样频率并关注趋势。"
+            summary = "Environment is WARN; increase sampling and observe trend."
         else:
-            summary = "环境状态正常。"
+            summary = "Environment is normal."
 
         return {
             "status": "success",
@@ -97,19 +99,21 @@ class SkillEngine:
             return {
                 "status": "error",
                 "skill": "safe_control",
-                "error": f"strategy 不支持: {strategy}",
+                "error": f"unsupported strategy: {strategy}",
                 "allowed": ["auto", "emergency_stop", "pulse"],
                 "code": "BAD_ARG",
             }
 
         if plan == "emergency_stop":
             action = self.relay_all_off(timeout_ms=timeout_ms)
+            action_applied = bool(action.get("status") == "success")
             return {
-                "status": "success" if action.get("status") == "success" else "failed",
+                "status": "success" if action_applied else "failed",
                 "skill": "safe_control",
                 "strategy": plan,
                 "action": action,
-                "summary": "已执行紧急停机（全继电器关闭）。",
+                "action_applied": action_applied,
+                "summary": "Emergency stop executed.",
             }
 
         if plan == "pulse":
@@ -123,15 +127,17 @@ class SkillEngine:
                 relay_on_duration_sec=relay_on_duration_sec,
                 timeout_ms=timeout_ms,
             )
+            action_result = action.get("action", {}).get("result", {}) if isinstance(action.get("action"), dict) else {}
+            action_applied = bool(action_result.get("action_applied", action_result.get("matched", False)))
             return {
                 "status": action.get("status"),
                 "skill": "safe_control",
                 "strategy": plan,
                 "action": action,
-                "summary": "已按 pulse 策略执行受控联动。",
+                "action_applied": action_applied,
+                "summary": "Pulse safety strategy executed.",
             }
 
-        # auto
         action = self.safety_control(
             action_mode="all_off",
             force_action=False,
@@ -140,10 +146,47 @@ class SkillEngine:
             safety_confirm=safety_confirm,
             timeout_ms=timeout_ms,
         )
+        action_result = action.get("action", {}).get("result", {}) if isinstance(action.get("action"), dict) else {}
+        action_applied = bool(action_result.get("status") == "success")
         return {
             "status": action.get("status"),
             "skill": "safe_control",
             "strategy": plan,
             "action": action,
-            "summary": "已按 auto 策略评估并执行（仅 CRITICAL 触发）。",
+            "action_applied": action_applied,
+            "summary": "Auto safety strategy evaluated and executed.",
+        }
+
+    def run_relay_closed_loop_skill(
+        self,
+        channel: int,
+        state: int,
+        timeout_ms: int = 5000,
+        retries: int = 2,
+        safety_confirm: bool = False,
+        fail_safe_all_off: bool = True,
+    ) -> Dict[str, Any]:
+        action = self.relay_set_with_verify(
+            channel=channel,
+            state=state,
+            timeout_ms=timeout_ms,
+            retries=retries,
+            safety_confirm=safety_confirm,
+        )
+
+        applied = bool(action.get("action_applied", action.get("matched", False)))
+        fallback = None
+        if not applied and fail_safe_all_off:
+            fallback = self.relay_all_off(timeout_ms=timeout_ms)
+
+        state_view = self.read_relay_state(channel=0, timeout_ms=timeout_ms)
+
+        return {
+            "status": "success" if applied else "failed",
+            "skill": "relay_closed_loop",
+            "requested": {"channel": channel, "state": state},
+            "action_result": action,
+            "action_applied": applied,
+            "fallback_action": fallback,
+            "relay_state": state_view,
         }

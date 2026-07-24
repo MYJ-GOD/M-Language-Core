@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdlib.h>
 #include "validator.h"
 #include "m_vm.h"
 

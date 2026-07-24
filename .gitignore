@@ -134,3 +134,9 @@ __pycache__/
 # Runtime data (logs/cache/db)
 data/**
 !data/.gitkeep
+
+# Node.js dependencies
+node_modules/
+
+# Submission package — tracked in its own repository (M-IR-MVM / lir-lvm)
+论文分区/ccfc/
