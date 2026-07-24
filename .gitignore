@@ -135,6 +135,9 @@ __pycache__/
 data/**
 !data/.gitkeep
 
+# CodeGraph index
+.codegraph/
+
 # Node.js dependencies
 node_modules/
 
