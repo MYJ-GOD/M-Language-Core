@@ -1,14 +1,18 @@
-# 端到端冒烟：自然语言 -> LLM(Ollama) -> LIR -> 字节码 -> 执行
+# 端到端冒烟：自然语言 -> LLM(Ollama) -> M-IR -> M-Token 字节码 -> 执行
 #
-# 验证核心命题：LLM 能否从自然语言生成"可编译、可执行、门控通过"的 LIR。
-# 这是产品优先路线的第一个真实里程碑（不再是构造好的 LIR，而是 LLM 自己写的）。
+# 验证核心命题：LLM 能否从自然语言生成"可编译、可执行、门控通过"的 M-IR。
+# 这是产品优先路线的第一个真实里程碑（不再是构造好的 M-IR，而是 LLM 自己写的）。
 #
-# 用法：cd python/MCP && python smoke_e2e.py [model]
+# 用法：cd tests && python smoke_e2e.py [model]
 
 import re
 import sys
 import json
 import urllib.request
+from pathlib import Path
+
+# 添加 python/MCP 到路径
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python" / "MCP"))
 
 from lir_backend import execute_lir
 

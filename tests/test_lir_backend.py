@@ -1,10 +1,16 @@
-# LIR 后端回归测试
+# M-IR 后端回归测试
 #
 # 固化"接断点 + 路线A设备化 + 文件槽真实执行"三步的已验证行为。
-# 运行：cd python/MCP && python -m pytest test_lir_backend.py -v
+# 运行：cd tests && python -m pytest test_lir_backend.py -v
 #
 # 说明：文件写入测试用 tmp_path 作沙箱根，通过 monkeypatch 覆写 pc_resources 的
 # _FILE_ROOT，避免污染真实目录、也不依赖环境变量顺序。
+
+import sys
+from pathlib import Path
+
+# 添加 python/MCP 到路径，以便导入 lir_backend 等模块
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python" / "MCP"))
 
 import pytest
 

@@ -6,44 +6,51 @@ M-Language Core 是一个面向 AI 与硬件控制的本地系统，当前已实
 - 继电器安全控制（确认门禁、自动回落）
 - 审计日志、熔断保护、健康报告
 - Skills 编排层（巡检/环境评估/安全控制）
+- M-IR 编译链（自然语言 → M-IR → M-Token 字节码 → 执行）
 
-## 1. 项目结构（当前实际）
+## 1. 项目结构
 
 ```text
 M-Language-Core/
-├── include/                      # C 头文件（MVM）
-├── src/                          # C 源码（MVM）
-├── firmware/                     # ESP8266 固件
+├── src/                          # C 源码（MVM 虚拟机）
+│   ├── include/                  # 头文件
+│   │   ├── m_vm.h
+│   │   ├── disasm.h
+│   │   └── validator.h
+│   ├── m_vm.c                    # 虚拟机核心
+│   ├── disasm.c                  # 反汇编器
+│   ├── validator.c               # 字节码验证器
+│   └── main.c                    # 测试套件
+├── firmware/
+│   └── mvm_esp8266.ino           # ESP8266 固件
 ├── python/
-│   └── MCP/
-│       ├── server.py             # MCP Server（工具层 + 运维工具 + skill入口）
-│       ├── skills.py             # Skills 编排层实现
-│       ├── core.py               # 串口通信与 M-Token 执行封装
-│       ├── lir_backend.py        # M-IR 编译 + PC 端模拟桥接
-│       ├── pc_resources.py       # PC 资源设备化（文件槽真实执行器）
-│       ├── mlang/
-│       │   ├── compiler.py       # M-IR 编译器
-│       │   └── simulator.py      # PC 端 MVM 模拟器
-│       ├── protocol.md           # 串口协议
-│       ├── requirements.txt
-│       └── __init__.py
-├── tool-router/
-│   ├── router.py                 # OpenAI-compatible Router（连接 Ollama 与 MCP）
-│   ├── requirements.txt
-│   └── README.md
+│   ├── mcp/                      # MCP 服务器 + Skills
+│   │   ├── server.py             # MCP 工具层（25+ 工具）
+│   │   ├── skills.py             # Skills 编排层（4 个工作流）
+│   │   ├── core.py               # 串口通信封装
+│   │   ├── lir_backend.py        # M-IR 编译桥接
+│   │   ├── pc_resources.py       # PC 资源设备化
+│   │   └── mlang/                # M-IR 编译器 + 模拟器
+│   │       ├── compiler.py
+│   │       └── simulator.py
+│   └── tool_router/              # OpenAI-compatible Router
+│       └── router.py
+├── tests/                        # 测试
+│   ├── test_lir_backend.py       # M-IR 后端回归测试（15 用例）
+│   └── smoke_e2e.py              # 端到端冒烟测试
 ├── scripts/
 │   └── start_all.bat             # 一键启动脚本
-├── Docs/
+├── docs/                         # 文档
 │   ├── 00_文档导航.md
+│   ├── 40_施工路线图.md
 │   ├── 10_MCP+Skills实施方案.md
 │   ├── mcp和skills.md
 │   ├── M-Token规范.md
 │   ├── M 语言体系完整大纲.md
 │   ├── 20_AI原生操作系统架构.md
-│   ├── 30_项目完成度报告.md
-│   └── 40_施工路线图.md
+│   └── 30_项目完成度报告.md
 ├── data/                         # 运行时数据（审计、缓存等）
-├── M-Language-Core.sln
+├── .gitignore
 └── README.md
 ```
 
@@ -73,6 +80,10 @@ M-Language-Core/
 - `reset_guard_mcp`
 - `execute_m_logic_mcp`（低层调试）
 
+M-IR 编译链：
+- `execute_lir_mcp`（纯模拟、零副作用）
+- `execute_lir_action_mcp`（真实文件写入）
+
 闭环/实验类：
 - `read_relay_state_mcp`
 - `run_relay_closed_loop_skill_mcp`
@@ -84,10 +95,7 @@ M-Language-Core/
 - `run_patrol_skill_mcp`：巡检工作流（自检 + 健康报告 + 审计摘要）
 - `run_environment_skill_mcp`：环境评估工作流（快照 + 阈值评估）
 - `run_safe_control_skill_mcp`：安全控制工作流（auto/emergency_stop/pulse）
-
-### 2.3 M-IR 编译链
-- `execute_lir_mcp`：纯模拟、零副作用
-- `execute_lir_action_mcp`：真实文件写入（沙箱 + 路径穿越拦截）
+- `run_relay_closed_loop_skill_mcp`：继电器闭环控制
 
 ## 3. 一键启动
 
@@ -114,7 +122,7 @@ scripts\start_all.bat
 ### 4.1 单独运行 MCP Server
 
 ```powershell
-cd python\MCP
+cd python\mcp
 pip install -r requirements.txt
 python server.py
 ```
@@ -122,7 +130,7 @@ python server.py
 ### 4.2 单独运行 Router
 
 ```powershell
-cd tool-router
+cd python\tool_router
 pip install -r requirements.txt
 uvicorn router:app --host 127.0.0.1 --port 8000
 ```
@@ -130,7 +138,7 @@ uvicorn router:app --host 127.0.0.1 --port 8000
 ### 4.3 运行测试
 
 ```powershell
-cd python\MCP
+cd tests
 python -m pytest test_lir_backend.py -v
 ```
 
@@ -160,18 +168,18 @@ python -m pytest test_lir_backend.py -v
 ## 7. 文档导航
 
 请先读：
-1. `Docs/00_文档导航.md`
-2. `Docs/40_施工路线图.md`
-3. `Docs/10_MCP+Skills实施方案.md`
-4. `Docs/mcp和skills.md`
-5. `Docs/M-Token规范.md`
-6. `Docs/M 语言体系完整大纲.md`
+1. `docs/00_文档导航.md`
+2. `docs/40_施工路线图.md`
+3. `docs/10_MCP+Skills实施方案.md`
+4. `docs/mcp和skills.md`
+5. `docs/M-Token规范.md`
+6. `docs/M 语言体系完整大纲.md`
 
 ## 8. 维护约定
 
 - 新增硬件能力：先做 MCP 语义工具，再接入 Skills。
-- 新增业务流程：优先改 `python/MCP/skills.py`，避免把流程逻辑写死在 Router。
-- 根目录文档用于草稿，定稿后归档到 `Docs/`。
+- 新增业务流程：优先改 `python/mcp/skills.py`，避免把流程逻辑写死在 Router。
+- 根目录文档用于草稿，定稿后归档到 `docs/`。
 
 ## 许可证
 

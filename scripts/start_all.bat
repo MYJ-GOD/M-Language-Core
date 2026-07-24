@@ -68,7 +68,7 @@ echo.
 
 REM 3) Start Tool Router (connects to local Ollama + MCP)
 echo [3/4] Starting Tool Router...
-start "Tool Router" cmd /k "set OLLAMA_BASE_URL=%OLLAMA_BASE_URL% && set OLLAMA_MODEL=%OLLAMA_MODEL% && set MCP_HTTP_URL=%MCP_HTTP_URL% && %PY% -m uvicorn router:app --app-dir %ROOT%\\tool-router --host 127.0.0.1 --port 8000"
+start "Tool Router" cmd /k "set OLLAMA_BASE_URL=%OLLAMA_BASE_URL% && set OLLAMA_MODEL=%OLLAMA_MODEL% && set MCP_HTTP_URL=%MCP_HTTP_URL% && %PY% -m uvicorn router:app --app-dir %ROOT%\\python\\tool_router --host 127.0.0.1 --port 8000"
 
 echo      [OK] Tool Router starting (8000)
 timeout /t 2 /nobreak >nul
