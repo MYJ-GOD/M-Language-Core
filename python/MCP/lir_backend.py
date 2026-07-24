@@ -167,6 +167,7 @@ def execute_lir_with_side_effects(
         device_state=dry["simulation"]["relay_state"],
         resource_bindings=resource_bindings,
         id_to_slot=_ID_TO_SLOT,
+        sensor_values=sensor_values,
     )
     dry["materialized"] = mat
     if not mat["ok"]:

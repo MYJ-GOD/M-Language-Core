@@ -12,7 +12,7 @@
 
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # 与 lir_backend.PC_DEVICE_IDS 一致的地址区间
 _FILE_ID_LO, _FILE_ID_HI = 200, 209
@@ -36,12 +36,16 @@ def materialize_files(
     device_state: Dict[int, int],
     resource_bindings: Dict[str, Dict[str, Any]],
     id_to_slot: Dict[int, str],
+    sensor_values: Optional[Dict[int, int]] = None,
 ) -> Dict[str, Any]:
     """根据模拟终态物化文件写入。
 
     device_state:      模拟后的设备终态 {device_id: value}
-    resource_bindings: 槽位 -> {"path": <沙箱内相对路径>, "content": <字符串>}
+    resource_bindings: 槽位 -> {"path": <沙箱内相对路径>, "content": <字符串>, "source_device": <device_id>}
+                       - content: 静态内容（向后兼容）
+                       - source_device: 从 device_state 或 sensor_values 动态获取内容（优先级高于 content）
     id_to_slot:        device_id -> 槽位名(用于反查)
+    sensor_values:     传感器值 {device_id: value}，用于 source_device 查找
 
     返回 {"ok": bool, "written": [...], "error": str|None}
     """
@@ -68,7 +72,22 @@ def materialize_files(
                         "error": "file slot %r activated but has no trusted binding" % slot}
             target = _resolve_in_sandbox(binding["path"])
             target.parent.mkdir(parents=True, exist_ok=True)
-            content = str(binding.get("content", ""))
+
+            # 动态内容：从 source_device 获取设备值
+            source_device = binding.get("source_device")
+            if source_device is not None:
+                # 优先从 device_state 获取，其次从 sensor_values 获取
+                if source_device in device_state:
+                    content = str(device_state[source_device])
+                elif sensor_values and source_device in sensor_values:
+                    content = str(sensor_values[source_device])
+                else:
+                    return {"ok": False, "written": written,
+                            "error": "source_device %d not found in device_state or sensor_values" % source_device}
+            else:
+                # 静态内容（向后兼容）
+                content = str(binding.get("content", ""))
+
             target.write_text(content, encoding="utf-8")
             written.append({"slot": slot, "device_id": dev, "path": str(target), "bytes": len(content)})
     except (ValueError, OSError) as e:

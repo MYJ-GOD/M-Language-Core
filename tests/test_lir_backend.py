@@ -164,3 +164,68 @@ def test_compile_failure_produces_no_side_effect(sandbox):
     assert r["status"] == "compile_error"
     assert r["materialized"]["ok"] is False
     assert not (sandbox / "should_not_exist.log").exists()
+
+
+# ---------------------------------------------------------------------------
+# 四、动态内容：从传感器读数写入文件
+# ---------------------------------------------------------------------------
+
+def test_dynamic_content_from_sensor(sandbox):
+    """读取温度传感器(device_id=2)的值，写入 file0(device_id=200)"""
+    lir = (
+        "task log_temp {\n"
+        "  require cap(temperature_sensor)\n"
+        "  require cap(file0)\n"
+        "  read temperature_sensor\n"  # 读温度，值入栈
+        "  set file0 = 1\n"            # 激活 file0
+        "  halt\n}"
+    )
+    r = execute_lir_with_side_effects(
+        lir,
+        resource_bindings={"file0": {"path": "temp.log", "source_device": 2}},
+        sensor_values={2: 25},  # 温度=25
+    )
+    assert r["status"] == "success"
+    assert r["materialized"]["ok"] is True
+    assert (sandbox / "temp.log").read_text(encoding="utf-8") == "25"
+
+
+def test_dynamic_content_from_relay(sandbox):
+    """读取继电器状态(device_id=5)，写入 file0"""
+    lir = (
+        "task log_relay {\n"
+        "  require cap(relay1)\n"
+        "  require cap(file0)\n"
+        "  set relay1 = 1\n"   # 开继电器
+        "  set file0 = 1\n"   # 激活 file0
+        "  halt\n}"
+    )
+    r = execute_lir_with_side_effects(
+        lir,
+        resource_bindings={"file0": {"path": "relay.log", "source_device": 5}},
+    )
+    assert r["status"] == "success"
+    assert r["materialized"]["ok"] is True
+    assert (sandbox / "relay.log").read_text(encoding="utf-8") == "1"
+
+
+def test_dynamic_content_source_device_missing(sandbox):
+    """source_device 指向的设备不在 device_state 中"""
+    lir = "task t {\n  require cap(file0)\n  set file0 = 1\n  halt\n}"
+    r = execute_lir_with_side_effects(
+        lir,
+        resource_bindings={"file0": {"path": "out.log", "source_device": 999}},
+    )
+    assert r["status"] == "side_effect_error"
+    assert "not found in device_state" in r["materialized"]["error"]
+
+
+def test_static_content_backward_compatible(sandbox):
+    """静态 content 仍然向后兼容"""
+    lir = "task t {\n  require cap(file0)\n  set file0 = 1\n  halt\n}"
+    r = execute_lir_with_side_effects(
+        lir,
+        resource_bindings={"file0": {"path": "out.log", "content": "static_value"}},
+    )
+    assert r["status"] == "success"
+    assert (sandbox / "out.log").read_text(encoding="utf-8") == "static_value"
