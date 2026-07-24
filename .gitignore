@@ -138,6 +138,10 @@ data/**
 # CodeGraph index
 .codegraph/
 
+# Secrets
+*.secret_key
+.webui_secret_key
+
 # Node.js dependencies
 node_modules/
 
