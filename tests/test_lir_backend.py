@@ -269,3 +269,27 @@ def test_proc_slot_not_activated(sandbox):
     assert r["status"] == "success"
     assert r["materialized"]["processes"]["ok"] is True
     assert len(r["materialized"]["processes"]["results"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# 六、网络槽：net0..net9
+# ---------------------------------------------------------------------------
+
+def test_net_slot_without_binding_refused(sandbox):
+    """网络槽激活但无绑定时拒绝"""
+    lir = "task t {\n  require cap(net0)\n  set net0 = 1\n  halt\n}"
+    r = execute_lir_with_side_effects(lir, resource_bindings={})
+    assert r["status"] == "side_effect_error"
+    assert "no trusted binding" in r["materialized"]["networks"]["error"]
+
+
+def test_net_slot_not_activated(sandbox):
+    """网络槽未激活（val=0）不执行"""
+    lir = "task t {\n  require cap(net0)\n  set net0 = 0\n  halt\n}"
+    r = execute_lir_with_side_effects(
+        lir,
+        resource_bindings={"net0": {"host": "example.com", "port": 80}},
+    )
+    assert r["status"] == "success"
+    assert r["materialized"]["networks"]["ok"] is True
+    assert len(r["materialized"]["networks"]["results"]) == 0

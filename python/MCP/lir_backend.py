@@ -181,12 +181,20 @@ def execute_lir_with_side_effects(
         id_to_slot=_ID_TO_SLOT,
     )
 
+    # 网络槽
+    mat_nets = pc_resources.materialize_network(
+        device_state=device_state,
+        resource_bindings=resource_bindings,
+        id_to_slot=_ID_TO_SLOT,
+    )
+
     dry["materialized"] = {
         "files": mat_files,
         "processes": mat_procs,
+        "networks": mat_nets,
     }
 
-    if not mat_files["ok"] or not mat_procs["ok"]:
+    if not mat_files["ok"] or not mat_procs["ok"] or not mat_nets["ok"]:
         dry["status"] = "side_effect_error"
 
     return dry

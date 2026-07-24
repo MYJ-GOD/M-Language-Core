@@ -11,6 +11,7 @@
 #   4. 两阶段：调用方先跑纯模拟演练，仅当 verify+execution 全通过才调用本模块物化。
 
 import os
+import socket
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -50,15 +51,6 @@ def materialize_files(
 
     返回 {"ok": bool, "written": [...], "error": str|None}
     """
-    # 安全闸门：网络槽被激活一律拒绝（本版未实现，不允许静默跳过）
-    for dev, val in device_state.items():
-        if val and (_NET_ID_LO <= dev <= _NET_ID_HI):
-            return {
-                "ok": False,
-                "written": [],
-                "error": "net slot %d activated but not supported in this executor; refusing to materialize" % dev,
-            }
-
     written = []
     try:
         for dev, val in device_state.items():
@@ -179,3 +171,100 @@ def materialize_processes(
 def get_proc_result(slot: str) -> Optional[Dict[str, Any]]:
     """获取进程槽的最近一次执行结果（用于 IOR 读取）。"""
     return _PROC_RESULTS.get(slot)
+
+
+# ---------------------------------------------------------------------------
+# 网络槽：net0..net9
+# ---------------------------------------------------------------------------
+
+# 网络执行结果缓存 {slot: {"sent": int, "received": str, "error": str|None}}
+_NET_RESULTS: Dict[str, Dict[str, Any]] = {}
+
+
+def materialize_network(
+    device_state: Dict[int, int],
+    resource_bindings: Dict[str, Dict[str, Any]],
+    id_to_slot: Dict[int, str],
+) -> Dict[str, Any]:
+    """根据模拟终态执行网络操作（TCP 收发）。
+
+    device_state:      模拟后的设备终态 {device_id: value}
+    resource_bindings: 槽位 -> {"host": <主机>, "port": <端口>, "send_data": <发送数据>, "recv_size": <接收大小>}
+                       - host: 目标主机（必填）
+                       - port: 目标端口（必填）
+                       - send_data: 要发送的数据（可选，默认为空）
+                       - recv_size: 接收缓冲区大小（可选，默认 4096）
+    id_to_slot:        device_id -> 槽位名(用于反查)
+
+    返回 {"ok": bool, "results": [...], "error": str|None}
+    """
+    results = []
+    try:
+        for dev, val in device_state.items():
+            if not (_NET_ID_LO <= dev <= _NET_ID_HI):
+                continue
+            if not val:  # 终态未激活的网络槽不执行
+                continue
+
+            slot = id_to_slot.get(dev)
+            binding = resource_bindings.get(slot) if slot else None
+            if not binding:
+                return {"ok": False, "results": results,
+                        "error": "net slot %r activated but has no trusted binding" % slot}
+
+            host = binding.get("host")
+            port = binding.get("port")
+            if not host or not port:
+                return {"ok": False, "results": results,
+                        "error": "net slot %r binding missing 'host' or 'port'" % slot}
+
+            send_data = binding.get("send_data", "")
+            recv_size = binding.get("recv_size", 4096)
+
+            # 执行网络操作
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(10)  # 10 秒超时
+                    sock.connect((host, int(port)))
+
+                    # 发送数据
+                    sent_bytes = 0
+                    if send_data:
+                        sent_bytes = sock.send(send_data.encode("utf-8"))
+
+                    # 接收数据
+                    received = ""
+                    try:
+                        data = sock.recv(int(recv_size))
+                        received = data.decode("utf-8", errors="replace")
+                    except socket.timeout:
+                        pass  # 超时不报错，返回已接收的数据
+
+                    result = {
+                        "slot": slot,
+                        "device_id": dev,
+                        "host": host,
+                        "port": port,
+                        "sent": sent_bytes,
+                        "received": received[:1024],  # 限制输出长度
+                        "error": None,
+                    }
+                    _NET_RESULTS[slot] = result
+                    results.append(result)
+
+            except socket.timeout:
+                return {"ok": False, "results": results,
+                        "error": "net slot %r connection timed out (10s)" % slot}
+            except OSError as e:
+                return {"ok": False, "results": results,
+                        "error": "net slot %r network failed: %s" % (slot, str(e))}
+
+    except (ValueError, OSError) as e:
+        return {"ok": False, "results": results, "error": str(e)}
+
+    return {"ok": True, "results": results, "error": None}
+
+
+def get_net_result(slot: str) -> Optional[Dict[str, Any]]:
+    """获取网络槽的最近一次执行结果（用于 IOR 读取）。"""
+    return _NET_RESULTS.get(slot)
