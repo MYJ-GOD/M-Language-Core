@@ -126,7 +126,7 @@ def test_real_file_write(sandbox):
         resource_bindings={"file0": {"path": "out.log", "content": "hello"}},
     )
     assert r["status"] == "success"
-    assert r["materialized"]["ok"] is True
+    assert r["materialized"]["files"]["ok"] is True
     assert (sandbox / "out.log").read_text(encoding="utf-8") == "hello"
 
 
@@ -136,23 +136,23 @@ def test_path_traversal_blocked(sandbox):
         resource_bindings={"file0": {"path": "../../etc/passwd", "content": "x"}},
     )
     assert r["status"] == "side_effect_error"
-    assert "escapes sandbox" in r["materialized"]["error"]
+    assert "escapes sandbox" in r["materialized"]["files"]["error"]
     assert not (sandbox.parent.parent / "etc" / "passwd").exists()
 
 
 def test_file_slot_without_binding_refused(sandbox):
     r = execute_lir_with_side_effects(FILE_LIR, resource_bindings={})
     assert r["status"] == "side_effect_error"
-    assert "no trusted binding" in r["materialized"]["error"]
+    assert "no trusted binding" in r["materialized"]["files"]["error"]
 
 
-def test_proc_slot_refused(sandbox):
+def test_proc_slot_without_binding_refused(sandbox):
     r = execute_lir_with_side_effects(
         "task p {\n  require cap(proc0)\n  set proc0 = 1\n  halt\n}",
         resource_bindings={},
     )
     assert r["status"] == "side_effect_error"
-    assert "not supported" in r["materialized"]["error"]
+    assert "no trusted binding" in r["materialized"]["processes"]["error"]
 
 
 def test_compile_failure_produces_no_side_effect(sandbox):
@@ -186,7 +186,7 @@ def test_dynamic_content_from_sensor(sandbox):
         sensor_values={2: 25},  # 温度=25
     )
     assert r["status"] == "success"
-    assert r["materialized"]["ok"] is True
+    assert r["materialized"]["files"]["ok"] is True
     assert (sandbox / "temp.log").read_text(encoding="utf-8") == "25"
 
 
@@ -205,19 +205,19 @@ def test_dynamic_content_from_relay(sandbox):
         resource_bindings={"file0": {"path": "relay.log", "source_device": 5}},
     )
     assert r["status"] == "success"
-    assert r["materialized"]["ok"] is True
+    assert r["materialized"]["files"]["ok"] is True
     assert (sandbox / "relay.log").read_text(encoding="utf-8") == "1"
 
 
 def test_dynamic_content_source_device_missing(sandbox):
-    """source_device 指向的设备不在 device_state 中"""
+    """source_device 指向的设备不在 device_state 或 sensor_values 中"""
     lir = "task t {\n  require cap(file0)\n  set file0 = 1\n  halt\n}"
     r = execute_lir_with_side_effects(
         lir,
         resource_bindings={"file0": {"path": "out.log", "source_device": 999}},
     )
     assert r["status"] == "side_effect_error"
-    assert "not found in device_state" in r["materialized"]["error"]
+    assert "not found in device_state" in r["materialized"]["files"]["error"]
 
 
 def test_static_content_backward_compatible(sandbox):
@@ -229,3 +229,43 @@ def test_static_content_backward_compatible(sandbox):
     )
     assert r["status"] == "success"
     assert (sandbox / "out.log").read_text(encoding="utf-8") == "static_value"
+
+
+# ---------------------------------------------------------------------------
+# 五、进程槽：proc0..proc9
+# ---------------------------------------------------------------------------
+
+def test_proc_slot_execute(sandbox):
+    """执行简单命令并获取退出码"""
+    lir = "task run {\n  require cap(proc0)\n  set proc0 = 1\n  halt\n}"
+    r = execute_lir_with_side_effects(
+        lir,
+        resource_bindings={"proc0": {"command": "python", "args": ["-c", "print('hello')"]}},
+    )
+    assert r["status"] == "success", f"materialized: {r.get('materialized')}"
+    assert r["materialized"]["processes"]["ok"] is True
+    assert r["materialized"]["processes"]["results"][0]["returncode"] == 0
+    assert "hello" in r["materialized"]["processes"]["results"][0]["stdout"]
+
+
+def test_proc_slot_failure(sandbox):
+    """执行失败的命令"""
+    lir = "task run {\n  require cap(proc0)\n  set proc0 = 1\n  halt\n}"
+    r = execute_lir_with_side_effects(
+        lir,
+        resource_bindings={"proc0": {"command": "python", "args": ["-c", "import sys; sys.exit(1)"]}},
+    )
+    assert r["status"] == "success"  # 执行成功（进程本身返回 1）
+    assert r["materialized"]["processes"]["results"][0]["returncode"] == 1
+
+
+def test_proc_slot_not_activated(sandbox):
+    """进程槽未激活（val=0）不执行"""
+    lir = "task t {\n  require cap(proc0)\n  set proc0 = 0\n  halt\n}"
+    r = execute_lir_with_side_effects(
+        lir,
+        resource_bindings={"proc0": {"command": "python", "args": ["-c", "print('should not run')"]}},
+    )
+    assert r["status"] == "success"
+    assert r["materialized"]["processes"]["ok"] is True
+    assert len(r["materialized"]["processes"]["results"]) == 0

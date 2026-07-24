@@ -148,13 +148,14 @@ def execute_lir_with_side_effects(
     resource_bindings: Dict[str, Dict[str, Any]],
     sensor_values: Optional[Dict[int, int]] = None,
 ) -> Dict[str, Any]:
-    """行动平面：M-IR 编译+模拟演练全通过后，物化文件槽的真实写入。
+    """行动平面：M-IR 编译+模拟演练全通过后，物化文件槽/进程槽的真实操作。
 
     两阶段：先复用 execute_lir 做零副作用演练；仅当 status==success 才调用
     pc_resources 物化。演练失败则原样返回，绝不产生任何真实副作用。
 
-    resource_bindings: 受信任的旁路绑定，如 {"file0": {"path": "temp.log", "content": "25"}}
-                       路径相对沙箱根解释，内容来自这里而非 LLM 的 M-IR。
+    resource_bindings: 受信任的旁路绑定
+                       文件槽：{"file0": {"path": "temp.log", "content": "25"}}
+                       进程槽：{"proc0": {"command": "python", "args": ["test.py"]}}
     """
     import pc_resources
 
@@ -163,15 +164,31 @@ def execute_lir_with_side_effects(
         dry["materialized"] = {"ok": False, "written": [], "error": "dry-run not success; no side effects"}
         return dry
 
-    mat = pc_resources.materialize_files(
-        device_state=dry["simulation"]["relay_state"],
+    device_state = dry["simulation"]["relay_state"]
+
+    # 文件槽
+    mat_files = pc_resources.materialize_files(
+        device_state=device_state,
         resource_bindings=resource_bindings,
         id_to_slot=_ID_TO_SLOT,
         sensor_values=sensor_values,
     )
-    dry["materialized"] = mat
-    if not mat["ok"]:
+
+    # 进程槽
+    mat_procs = pc_resources.materialize_processes(
+        device_state=device_state,
+        resource_bindings=resource_bindings,
+        id_to_slot=_ID_TO_SLOT,
+    )
+
+    dry["materialized"] = {
+        "files": mat_files,
+        "processes": mat_procs,
+    }
+
+    if not mat_files["ok"] or not mat_procs["ok"]:
         dry["status"] = "side_effect_error"
+
     return dry
 
 

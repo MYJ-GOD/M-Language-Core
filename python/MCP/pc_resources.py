@@ -11,6 +11,7 @@
 #   4. 两阶段：调用方先跑纯模拟演练，仅当 verify+execution 全通过才调用本模块物化。
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -49,13 +50,13 @@ def materialize_files(
 
     返回 {"ok": bool, "written": [...], "error": str|None}
     """
-    # 安全闸门：进程/网络槽被激活一律拒绝（本版未实现，不允许静默跳过）
+    # 安全闸门：网络槽被激活一律拒绝（本版未实现，不允许静默跳过）
     for dev, val in device_state.items():
-        if val and (_PROC_ID_LO <= dev <= _NET_ID_HI):
+        if val and (_NET_ID_LO <= dev <= _NET_ID_HI):
             return {
                 "ok": False,
                 "written": [],
-                "error": "proc/net slot %d activated but not supported in this executor; refusing to materialize" % dev,
+                "error": "net slot %d activated but not supported in this executor; refusing to materialize" % dev,
             }
 
     written = []
@@ -94,3 +95,87 @@ def materialize_files(
         return {"ok": False, "written": written, "error": str(e)}
 
     return {"ok": True, "written": written, "error": None}
+
+
+# ---------------------------------------------------------------------------
+# 进程槽：proc0..proc9
+# ---------------------------------------------------------------------------
+
+# 进程执行结果缓存 {slot: {"returncode": int, "stdout": str, "stderr": str}}
+_PROC_RESULTS: Dict[str, Dict[str, Any]] = {}
+
+
+def materialize_processes(
+    device_state: Dict[int, int],
+    resource_bindings: Dict[str, Dict[str, Any]],
+    id_to_slot: Dict[int, str],
+) -> Dict[str, Any]:
+    """根据模拟终态执行进程操作。
+
+    device_state:      模拟后的设备终态 {device_id: value}
+    resource_bindings: 槽位 -> {"command": <命令>, "args": <参数列表>, "cwd": <工作目录>}
+                       - command: 要执行的命令（必填）
+                       - args: 命令参数列表（可选）
+                       - cwd: 工作目录（可选，默认为沙箱根目录）
+    id_to_slot:        device_id -> 槽位名(用于反查)
+
+    返回 {"ok": bool, "results": [...], "error": str|None}
+    """
+    results = []
+    try:
+        for dev, val in device_state.items():
+            if not (_PROC_ID_LO <= dev <= _PROC_ID_HI):
+                continue
+            if not val:  # 终态未激活的进程槽不执行
+                continue
+
+            slot = id_to_slot.get(dev)
+            binding = resource_bindings.get(slot) if slot else None
+            if not binding:
+                return {"ok": False, "results": results,
+                        "error": "proc slot %r activated but has no trusted binding" % slot}
+
+            command = binding.get("command")
+            if not command:
+                return {"ok": False, "results": results,
+                        "error": "proc slot %r binding missing 'command'" % slot}
+
+            args = binding.get("args", [])
+            cwd = binding.get("cwd")
+            if cwd:
+                cwd = str(_resolve_in_sandbox(cwd))
+
+            # 执行进程
+            try:
+                proc = subprocess.run(
+                    [command] + args,
+                    capture_output=True,
+                    text=True,
+                    cwd=cwd or str(_FILE_ROOT),
+                    timeout=30,  # 30 秒超时
+                )
+                result = {
+                    "slot": slot,
+                    "device_id": dev,
+                    "returncode": proc.returncode,
+                    "stdout": proc.stdout[:1024],  # 限制输出长度
+                    "stderr": proc.stderr[:1024],
+                }
+                _PROC_RESULTS[slot] = result
+                results.append(result)
+            except subprocess.TimeoutExpired:
+                return {"ok": False, "results": results,
+                        "error": "proc slot %r execution timed out (30s)" % slot}
+            except OSError as e:
+                return {"ok": False, "results": results,
+                        "error": "proc slot %r execution failed: %s" % (slot, str(e))}
+
+    except (ValueError, OSError) as e:
+        return {"ok": False, "results": results, "error": str(e)}
+
+    return {"ok": True, "results": results, "error": None}
+
+
+def get_proc_result(slot: str) -> Optional[Dict[str, Any]]:
+    """获取进程槽的最近一次执行结果（用于 IOR 读取）。"""
+    return _PROC_RESULTS.get(slot)
