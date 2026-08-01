@@ -49,7 +49,7 @@ python server.py
 
 # Run tests
 cd tests
-python -m pytest test_lir_backend.py -v
+python -m pytest test_lir_backend.py test_skills.py -v
 ```
 
 ## Documentation
